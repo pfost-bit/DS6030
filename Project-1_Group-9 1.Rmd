@@ -1,0 +1,881 @@
+---
+title:  |
+        | Disaster Relief Project
+        | Part One
+author: |
+        | Group Nine
+        | Patrick Foster
+        | Srivatsa Balasubramanyam 
+        | John Michael Epperson 
+date: March 3, 2025
+output:
+  bookdown::pdf_document2:
+    number_sections: true
+    toc: false
+    extra_dependencies: ["float"]
+subtitle: |
+          | University of Virginia
+          | School of Data Science
+          | Statistical Learning
+header-includes:
+  - \pagenumbering{gobble}
+  - \usepackage{booktabs}
+  - \usepackage{float}
+---
+
+\newpage
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(cache=TRUE, autodep=TRUE,cache.lazy = T)
+knitr::opts_chunk$set(fig.align="center", fig.pos="tbh", fig.height = 3, fig.width = 6)
+knitr::opts_chunk$set(echo=FALSE, message=FALSE, warning=FALSE)
+knitr::opts_chunk$set(fig.pos = "H", out.extra = "")
+
+library(tidymodels)
+library(tidyverse)
+library(patchwork)
+library(discrim)
+library(patchwork)
+library(ggrepel)
+library(ggmap)
+library(dotenv)
+library(webshot)
+library(plotly)
+library(kableExtra)
+
+load_dot_env(file = '.env')
+
+gmapkey <- Sys.getenv('gmapskey')
+
+register_google(key = gmapkey)
+
+set.seed(9)
+```
+
+```{r setup-parallel}
+#| cache: FALSE
+#| message: false
+library(doParallel)
+
+cl <- makePSOCKcluster(parallelly::availableCores(omit = 4))
+registerDoParallel(cl)
+```
+
+# Introduction
+
+On Tuesday January $12^{th}$ 2010, Haiti experienced a magnitude 7.0 earthquake just west of its capital, Port-au-Prince, causing massive damage in the area and displacing millions. In the days that followed, numerous aftershock earthquakes continued to cause damage across the region. The death toll from these quakes numbers in the hundreds of thousands, though the official count is unclear. The resulting damage to buildings and infrastructure left many more homeless, unable to travel, and without a way to obtain necessary provisions like food, clean water, and shelter.
+
+```{r aerial, fig.cap='Examples of aerial imagery captured by the team from Rochester Institute of Technology.',fig.show='hold',out.width='30%'}
+knitr::include_graphics(c('data/village1.jpg','data/village2.jpg','data/village3.jpg'))
+```
+
+Nations across the world responded to the Haitian government's appeal for aid by pledging funds and sending rescue personnel. Once rescue efforts were underway, however, the rescue workers faced a problem: without communications infrastructure, how does one know where to send supplies? One solution to this problem would come in the form of statistical modeling. It was well known that people displaced by the earthquake were using blue tarps to create makeshift shelters. A team from the Rochester Institute of Technology were collecting high resolution aerial photographs which were geo-referenced. Some examples of this are shown in Figure \@ref(fig:aerial). All that remained to do was go through the aerial images collected by the RIT team and locate the makeshift shelters. However, with so many displaced people across such a wide region, it was not feasible manually perform this work.
+
+Instead, statistical modeling was used on data derived from the aerial photography to locate the makeshift shelters. The benefits to this solution were numerous. Most importantly, it made it possible to get potential locations of displaced people in the hands of rescue workers on the ground, meaning that more people would get help faster. It also made locating the shelters more accurate since a team of humans performing the work manually would undoubtedly make mistakes.
+
+In this report, we will recreate these statistical models and attempt to predict shelter locations based on real data from the aerial imagery. We will focus on three models: logistic regression, linear discriminant analysis, and quadratic discriminant analysis.
+
+# Data
+
+```{r read-in-data}
+get_holdouts <- function(file) {
+  
+  infile <- read_lines(file,n_max = 20)
+  
+  col_row <- infile %>% 
+    data.frame() %>% 
+    mutate(text = gsub(';','',.)) %>% 
+    select(-.)%>% 
+    mutate(end = right(text,2) == 'B3',
+           row = row_number()) %>% 
+    filter(end==T) %>% 
+    select(row)
+  
+  f <- suppressWarnings(read_table(file,skip = col_row$row-1,n_max = 20,col_types = cols()))
+  
+  long_cols <- c('ID','X','Y','Map_X','Map_Y','Lat','Long','B1','B2','B3')
+  short_cols <- c('B1','B2','B3')
+  
+  if (ncol(f) > 4) {
+    final <- read_table(file,skip = col_row$row,col_names = long_cols,col_types = cols())
+  } else {
+    final <- read_table(file,skip = col_row$row,col_names = short_cols,col_types = cols())
+  }
+  
+}
+
+left <- function (x,n) substr(x,1,n)
+right <- function(x,n) substr(x,nchar(x)-n+1,nchar(x))
+
+training <- read_csv('data/HaitiPixels.csv') %>% 
+  mutate(Class = factor(Class)) %>% 
+  mutate(Tarp = factor(ifelse(Class=='Blue Tarp','Tarp','Not Tarp'))) %>% 
+  mutate(Tarp = fct_relevel(Tarp,c('Tarp','Not Tarp')))
+
+holdout <- data.frame(path = list.files('data/holdouts',recursive = T,pattern = '.txt',full.names = T)) %>% 
+  rowwise() %>% 
+  mutate(data = list(get_holdouts(path))) %>% 
+  ungroup()
+```
+
+The data has been loaded correctly, and exploratory data analysis (EDA) has been performed to better understand it.
+
+The dataset consists of nine files. Of these, eight belong to the holdout set, and one is part of the training set. The training set contains 63,241 observations and four variables. Each row corresponds to a specific pixel in a photograph, while the four columns represent a classification of the observation, as well as red, green, and blue (RGB) values. The classifications fall into five categories:
+
+* Blue Tarp
+* Rooftop
+* Soil
+* Various Non-Tarp
+* Vegetation
+
+Our primary focus is on the Blue Tarp classification. To facilitate analysis, we created an additional column that classifies each observation as either "Tarp" or "Not Tarp."
+
+The holdout set consists of eight files, each containing a large number of rows. These files include multiple columns, six of which correspond to various coordinate systems used to locate specific pixels within the original photographs. More relevant to our analysis are the columns representing RGB values, labeled in these files as `B1`, `B2`, and `B3`. As part of the initial EDA, we aim to determine how these columns correspond to specific RGB values.
+
+During this process, we discovered that one file, `Holdout/orthovnir067_ROI_Blue_Tarps_data.txt`, is a duplicate of another file. Since its data is already included in the holdout set, we removed it. The final holdout set contains over 2,000,000 data points.
+
+## The training dataset.    
+
+```{r}
+summary(training) %>% kbl(caption = 'Summary of Training Data') %>% 
+  kable_styling(latex_options = 'hold_position',position = 'center')
+```
+
+The training dataset, as noted above, consists of approximately 60,000 observations. Examining the `Tarp` variable reveals a significant class imbalance, with the vast majority of data points classified as `Not Tarp`. To explore this further, we analyzed the Class variable, which provides a breakdown of the specific classifications. We found that approximately 46,000 data points belong to the `Soil` or `Vegetation` categories.
+
+This distribution is logical given that the images are satellite photographs, where we would expect a high prevalence of green and brown colors corresponding to vegetation and soil. A simple bar chart illustrates the imbalance in the dataset.
+
+
+
+```{r}
+#| fig.width: 6
+#| fig.height: 3
+#| fig.cap: 'Classifications of the training set.'
+cols <- c('Blue Tarp' = 'blue','Rooftop' = 'black','Soil'='brown','Various Non-Tarp' = 'darkred','Vegetation'='darkgreen')
+
+training %>% 
+  ggplot(aes(x=Tarp, fill = Class)) +
+  geom_bar(position = "stack")+
+  scale_fill_manual(values=cols)+
+  labs(title = "Classifications of the training set",
+       x = "Tarp Status")+
+  theme(plot.title = element_text(hjust = .5))
+```
+
+The bar chart clearly highlights the disproportionate representation of different classes in the training dataset.  
+
+### RGB Parameter Analysis
+
+Examining summary statistics for the Red, Green, and Blue columns provides further insights. Both the Red and Green columns have higher mean and median values than the Blue column. A histogram of the training data offers a clearer view of this distribution.  
+
+```{r}
+training_rgb <- training %>% 
+  select(Red,Green,Blue) %>% 
+  mutate(
+    RGB = rgb(Red, Green, Blue, maxColorValue = 255)
+  )
+
+
+```
+
+
+```{r}
+#| fig.width: 6
+#| fig.height: 3
+#| fig.cap: 'Histograms of RGB Values'
+
+df_long <- training_rgb %>%
+  select(Red,Green,Blue) %>% 
+  pivot_longer(cols = c(Red, Green, Blue), names_to = "Channel", values_to = "Value")
+
+# Create histograms for each channel
+ggplot(df_long, aes(x = Value, fill = Channel)) +
+  geom_histogram(binwidth = 5, alpha = 0.3, position = "identity") +
+  facet_wrap(~ Channel, scales = "free_y") +
+  labs(title = "Histograms of RGB Values", x = "Value", y = "Count") +
+  scale_fill_manual(values = c("blue", "green", "red")) +
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = .5))
+
+```
+The histogram reveals that Blue values exhibit a bimodal distribution, with a large number of low values and a secondary peak around the 150–200 range. This second distribution is much less pronounced in the Green and Red values. Additionally, the maximum values (R = 255, G = 255) appear frequently in the Red and Green columns. 
+
+We can combine these values into a color gradient and see how often specific colors occur.  
+
+```{r}
+#| fig.width: 6
+#| fig.height: 3
+#| fig.cap: 'One-Dimensional RGB Gradient of Training Set'
+
+training_rgb$id <- 1:nrow(training_rgb)
+
+# Plot the gradient
+ggplot(training_rgb, aes(x = factor(id), y = 1, fill = RGB)) +
+  geom_tile() +
+  scale_fill_identity() + 
+  theme_void() +
+  labs(title = "One-Dimensional RGB Gradient of training set")+
+  theme(plot.title = element_text(hjust = .5))
+  
+
+
+```
+
+As expected, the dataset predominantly features greens, browns, and yellows. At the far right of the plot, we see the blue values we are interested in detecting.
+
+To visualize the data further, we created a three-dimensional plot of the training set, where each axis represents Red, Green, and Blue values, and each observation is colored according to its RGB composition.    
+
+```{r 3dtrain, fig.cap='3D Scatter plot of RGB values of the training set.'}
+#| fig.pos: H
+#| out.width: "80%"
+#| fig.align: "center"
+p <- training_rgb %>%
+  plot_ly(x = ~Red, y = ~Green, z = ~Blue, type = 'scatter3d', mode = 'markers', marker = list(size = 3, color = ~RGB)) %>% 
+    layout(scene = list(
+    xaxis = list(title = 'Red'),
+    yaxis = list(title = 'Green'),
+    zaxis = list(title = 'Blue'),
+    camera = list(
+      eye = list(x =sqrt(2),
+                 y =-sqrt(2),
+                 z =.2
+                   )
+    )
+  ),
+  title = '3D Scatter Plot of RGB Values Training')
+
+plotly::kaleido(p, file = "plotly_training.png" )
+knitr::include_graphics("plotly_training.png")
+```  
+
+
+
+In three-dimensional space, the separation of blue pixels from the background "noise" of browns, greens, and yellows becomes more apparent. Our ultimate goal is to develop a model capable of identifying and classifying these blue pixels.  
+
+## The holdout dataset  
+
+
+```{r}
+holdout_combo <- holdout %>% 
+  unnest(data) %>% 
+  na.omit()%>% 
+  mutate(b123 = rgb(B1,B2,B3,maxColorValue = 255),
+         b213 = rgb(B2,B1,B3,maxColorValue = 255),
+         b132 = rgb(B1,B3,B2,maxColorValue = 255),
+         b312 = rgb(B3,B1,B2,maxColorValue = 255),
+         b321 = rgb(B3,B2,B1,maxColorValue = 255),
+         b231 = rgb(B2,B3,B1,maxColorValue = 255)) %>% 
+  rename(lon=Long,lat=Lat) %>% 
+  select(path,lat,lon,B1,B2,B3,b123,b132,b213,b231,b321,b312) %>% 
+  nest(data = c(lat,lon,B1,B2,B3,b123,b132,b213,b231,b321,b312))
+
+all_holdout <- holdout_combo %>% 
+  select(data) %>% 
+  unnest(data) 
+```
+
+Below is the summary of the combined holdout dataset, which combines data from all holdout files. This dataset includes three columns, with summary statistics providing insights into their distributions. Based on our prior knowledge from the training dataset, we can begin to infer the meaning of these columns      
+
+```{r}
+#| warning: F
+summary(holdout_combo %>% select(data) %>% unnest(data) %>% select(B1,B2,B3)) %>% kbl(caption = 'Holdout set summary statistics.')
+```
+
+The third column, `B3`, has a significantly lower mean and median compared to the other two columns. This mirrors the statistics from the training dataset, suggesting that `B3` likely represents the blue values in the RGB spectrum.  
+
+Each file in the holdout dataset contains file names, some of which specify that they contain only tarp data. If we generate visualizations similar to those created for the training set, we can determine whether the RGB values in these files correspond primarily to blue. If so, we can confidently map the holdout dataset columns as follows:
+
+* B1 = Red (R)
+* B2 = Green (G)
+* B3 = Blue (B)  
+
+```{r}
+#| fig.width: 6
+#| fig.height: 3
+#| fig.cap: 'One-Dimensional RGB Gradient of Blue Holdout File'
+
+blues <- holdout$data[[2]]
+
+blues <- blues%>% 
+rowwise() %>%
+  mutate(
+    rgb_matrix = list(col2rgb(rgb(B1,B2,B3, maxColorValue = 255)) / 255),  # Convert HEX to RGB and normalize
+    hue = rgb2hsv(rgb_matrix[1], rgb_matrix[2], rgb_matrix[3])[1]  # Extract Hue
+  ) %>%
+  ungroup() %>%
+  arrange(hue)
+
+blues$id <- 1:nrow(blues)
+
+# Plot the gradient
+ggplot(blues, aes(x = factor(id), y = 1, fill = rgb(B1,B2,B3, maxColorValue = 255))) +
+  geom_tile() +
+  scale_fill_identity() + 
+  theme_void() +
+  labs(title = "One-Dimensional RGB Gradient of Blue holdout file")+
+  theme(plot.title = element_text(hjust = .5))
+```
+
+As anticipated, the color gradient visualization for the tarp-only files displays exclusively blue hues, confirming our assumption that the holdout dataset follows the expected mapping.  
+
+### Exploratory Data Analysis on a Holdout Data Subset
+
+Given the large size of the holdout dataset, we conducted EDA on a subset by randomly sampling 3\% of the data—approximately 60,000 observations.  
+
+
+```{r}
+sampled_holdout <- sample_n(all_holdout, size = .03*nrow(all_holdout)) %>% 
+  select(B1,B2,B3)
+```
+
+```{r}
+
+# Rename columns for clarity
+colnames(sampled_holdout) <- c("R", "G", "B")
+
+# Convert rows to RGB values
+sampled_holdout <- sampled_holdout %>%
+  mutate(RGB = rgb(R, G, B, maxColorValue = 255))
+```
+
+We created histograms of the RGB values for this subset of the holdout dataset.  
+
+```{r}
+#| fig.width: 6
+#| fig.height: 3
+#| fig.cap: 'Histograms of RGB values for holdout dataset.'
+
+
+# Create a long-format dataframe for easier plotting
+df_long <- sampled_holdout %>%
+  select(R,G,B) %>% 
+  pivot_longer(cols = c(R, G, B), names_to = "Channel", values_to = "Value")
+
+# Create histograms for each channel
+ggplot(df_long, aes(x = Value, fill = Channel)) +
+  geom_histogram(binwidth = 5, alpha = 0.3, position = "identity") +
+  facet_wrap(~ Channel, scales = "free_y") +
+  labs(title = "Histograms of RGB Values", x = "Value", y = "Count") +
+  scale_fill_manual(values = c("blue", "green", "red")) +
+  theme_minimal()
+
+```
+
+These histograms explain why the mean and median Blue values are lower than the Red and Green values: the Blue distribution is highly skewed toward lower values.  
+
+Next, we visualized the RGB values in a one-dimensional color gradient.  
+
+```{r fig.cap='One-Dimensional RGB Gradient of Sampled Holdouts'}
+
+sampled_holdout <- sampled_holdout%>% 
+rowwise() %>%
+  mutate(
+    rgb_matrix = list(col2rgb(RGB) / 255),  # Convert HEX to RGB and normalize
+    hue = rgb2hsv(rgb_matrix[1], rgb_matrix[2], rgb_matrix[3])[1]  # Extract Hue
+  ) %>%
+  ungroup() %>%
+  arrange(hue)
+
+sampled_holdout$id <- 1:nrow(sampled_holdout)
+# Plot the gradient
+ggplot(sampled_holdout, aes(x = factor(id), y = 1, fill = RGB)) +
+  geom_tile() +
+  scale_fill_identity() + 
+  theme_void() +
+  labs(title = "One-Dimensional RGB Gradient of Sampled Holdouts")+
+  theme(plot.title = element_text(hjust = .5))
+```
+
+As in the training set, the holdout dataset contains a predominance of browns and greens, with fewer occurrences of the blue shades we aim to detect.  
+
+This becomes even clearer in the three-dimensional visualization.  
+
+```{r 3dhold, fig.cap='Scatterplot of RBG values of the holdout set.'}
+#| fig.pos: H
+#| out.width: "80%"
+#| fig.align: "center"
+
+q <- sampled_holdout %>%
+  plot_ly(x = ~R, y = ~G, z = ~B, type = 'scatter3d', mode = 'markers', marker = list(size = 3, color = ~RGB)) %>% 
+    layout(scene = list(
+    xaxis = list(title = 'Red'),
+    yaxis = list(title = 'Green'),
+    zaxis = list(title = 'Blue'),
+    camera = list(
+      eye = list(x =sqrt(2),
+                 y =-sqrt(2),
+                 z =.2
+                   )
+    )
+  ),
+  title = '3D Scatter Plot of RGB Values of the HoldOut Set')
+
+plotly::save_image(q, file = "plotly_holdout.png" )
+knitr::include_graphics("plotly_holdout.png")
+
+```  
+
+
+The exploratory data analysis (EDA) of the training and holdout datasets reveals quite a few things. First and foremost, a significant class imbalance, with most observations classified as `Not Tarp`, likely of soil and vegetation. The RGB distributions confirm that red and green values dominate, while blue values are less frequent but exhibit a distinct pattern. Through visualizations and statistical analysis, we established that the holdout dataset follows the expected RGB mapping (B1 = R, B2 = G, B3 = B). These findings provide a foundation for developing a model to accurately identify blue tarp pixels amidst the background noise of natural colors.
+
+# Description of Methodology 
+
+In order to reliably identify displaced persons living in makeshift shelters due to the earthquake in Haiti, data derived from aerial images taken over affected areas were used to train predictive models that could identify the makeshift shelters faster and more accurately than any human. Three such models were investigated to solve this problem: Logistic Regression, Linear Discriminant Analysis, and Quadratic Discriminant Analysis.
+
+## Software Used
+
+All analysis in this study was done using the `R` programming language with RStudio. The `Tidymodels` package in `R` was used to build and test the three models. The package `patchwork` was used to help display plots in a more succinct way. Finally, the `Tidyverse` package was used throughout.
+
+## Data Preparation 
+
+
+The training data set was split using an 80/20 split - that is, 80% of full training data set is put into the training set, and the remaining 20% into the testing set. This proportion was chosen since the original training data set is fairly large at over sixty thousand observations. So, an 80/20 split will still leave plenty of data, over ten thousand observations, for the testing set, which will be used for model validation. Using more data for actually training the models will result in better model performance. Additionally, since ten-fold cross validation will be used to train the models, having more data available in the training set will allow for more data in each of the folds. The data split was also stratified by the Tarp variable to ensure that the same proportion of observations of Blue Tarp and Not Blue Tarp were in the training and testing sets.
+
+
+## Parameter Tuning
+
+To ensure that the models were comparable, the same pre-processing steps were applied to each model. Because the data set is imbalanced (less than 5\% of the observations in the data set are blue tarps), Synthetic Minority Oversampling was used to balance the data set. The oversampling ratio for each model was tuned using ten-fold cross validation and the best oversampling ratio for each model was chosen on the basis of optimizing F-Score. A new model for each of Logistic Regression, LDA, and QDA were created with the optimal oversampling ratio.
+
+## Model Validation
+
+The models were validated by comparing the performance of the training set and the test set to ensure that the models were not over-fitting the data. To evaluate this, the ROC AUC was compared. Over-fitting is clear when the performance of a model is much better on training data than it is on testing data. This shows that the model may have been too flexible, and is following the errors more than the actual trends in the data.
+
+## Threshold Selection
+
+Choosing an appropriate threshold is crucial for any classification problem, especially two class problem. If the threshold is set higher, the precision may increase but the recall will decrease. On the other hand, if the threshold is set lower the recall will improve at the cost of precision. It's important to keep in mind the goals of the problem when setting the threshold. For example, if a bank is attempting to predict the risk of default with new customers, they may decide on a lower threshold in order to correctly predict more of the customers who will default, but this comes at the cost of incorrectly classifying more people as likely to default who may not default.
+
+In the context of this problem, a threshold that is too low will identify a greater proportion of the actual makeshift shelters, but this will result in incorrectly classifying some non-shelters as makeshift shelters. This could result in rescue workers wasting precious time by attempting to deliver supplies to areas with no affected persons. If the threshold is set too high, less non-shelters will be identified as shelters, but this will also result in less actual makeshift shelters being identified, meaning some people who need aid will not receive any. For these reasons, it is vital to find a threshold that minimizes the number of retrieved non-shelters and maximizes the number of retrieved makeshift shelters.
+
+The F-measure, or F-score, was chosen to help decide on the optimal threshold because it is the harmonic mean of precision and recall. Precision is the proportion of retrieved items that are relevant; in context this is the number of predicted makeshift shelters that are actually makeshift shelters. And recall is the the proportion of relevant items that are retrieved; in context this is the number of actual makeshift shelters that are correctly identified. Since F-measure represents both of these metrics, finding the threshold with the highest F-measure will provide the best precision and recall, and thus correctly identify the most makeshift shelters while minimizing identification of non-shelters.
+
+## Model Performance Evaluation
+
+After identifying the optimal oversampling ratio and threshold for each model, the models' performance will be evaluated by comparing performance metrics of the models on training data and test data. Comparing the testing and training performance metrics will help identify whether or not the models have over-fitted the training data, which is obvious when there is a significant difference between testing and training performance. Again, F-measure will be used to evaluate model performance since a higher F-measure will provide a better balance between precision and recall. The model which shows no signs of over-fitting and performs the best on testing data will be chosen to make predictions on the holdout set and identify where makeshift shelters may be located.
+
+# Results
+
+## Model Fitting, Tuning Parameter Selection, Evaluation
+
+### Initial Model Creation
+
+As outlined above, the full training set was split into training and testing sets by an 80/20 proportion. A recipe with a pre-processing step for synthetic minority oversampling then each model was created using the same recipe to ensure the models could be compared fairly. The logistic regression model was created using the `glm` engine and the LDA and QDA models were created using the `MASS` engine. The model workflows were then created.
+
+```{r datasplit}
+dsplit = initial_split(training,prop = 0.8,strata = Tarp)
+train = training(dsplit)
+test = testing(dsplit)
+```
+
+```{r include = F}
+table(train$Tarp) %>% {prop.table(.)*100} %>% round(digits = 2)
+```
+
+
+```{r define-recipe}
+library(themis)
+formula <- Tarp ~ Red + Green + Blue
+d_recipe <- recipe(formula,data=train) %>% 
+#  step_normalize(all_numeric_predictors()) %>% 
+  step_smote(Tarp,seed = 9,over_ratio = tune())
+```
+
+```{r model-creation}
+resamples <- vfold_cv(train, v=10, strata=Tarp)
+custom_metrics <- metric_set(roc_auc, accuracy,f_meas)
+cv_control <- control_resamples(save_pred=TRUE,save_workflow = T,event_level = 'first')
+
+logreg_spec <- logistic_reg(mode='classification', engine='glm')
+lda_spec <- discrim_linear(mode = 'classification',engine = 'MASS')
+qda_spec <- discrim_quad(mode = 'classification',engine = 'MASS')
+
+logreg_wf <- workflow() %>%
+    add_recipe(d_recipe) %>%
+    add_model(logreg_spec)
+
+lda_wf <- workflow() %>% 
+  add_recipe(d_recipe) %>% 
+  add_model(lda_spec)
+
+qda_wf <- workflow() %>% 
+  add_recipe(d_recipe) %>% 
+  add_model(qda_spec)
+```
+
+```{r}
+tune_ratio <- function (wf, best_by, modelname, size = 20) {
+  parameters <- extract_parameter_set_dials(wf) %>%
+    update(over_ratio = over_ratio(c(0,1))
+           )
+  resamples <- vfold_cv(train, v=10, strata=Tarp)
+  custom_metrics <- metric_set(roc_auc,f_meas)
+  cv_control <- control_resamples(save_pred=TRUE,save_workflow = T,event_level = 'first')
+
+  tune_results <- tune_grid(wf,
+      resamples=resamples,
+      control=cv_control,
+      grid=grid_regular(parameters, levels=size),
+      metrics = custom_metrics)
+
+  best <- select_best(tune_results,metric = best_by)
+  plot <- autoplot(tune_results) + ggtitle(modelname)
+  
+  return(list(best=best,plot=plot))
+}
+```
+
+```{r tune-over_ratio, warning=F}
+lr_results <- tune_ratio(logreg_wf,best_by = 'f_meas', modelname = "Log. Reg.")
+lda_results <- tune_ratio(lda_wf,best_by = 'f_meas', modelname ='LDA')
+qda_results <- tune_ratio(qda_wf,best_by = 'f_meas',modelname = 'QDA')
+```
+
+The over-sampling ratio of each model was tuned using ten-fold cross validation and a regular grid with twenty levels. The best over-sampling ratio for each model was chosen using the F-measure. The optimal over-sampling ratios are summarized in the table below:
+
+```{r over-samples-table, results='asis'}
+library(kableExtra)
+tibble('Model' = c('Logistic Regression', 'LDA', 'QDA'),'Over-Sampling Ratio' = c(lr_results$best$over_ratio,lda_results$best$over_ratio,qda_results$best$over_ratio)) %>%
+  kbl(caption = 'Summary of Optimal Over-Sampling Ratios') %>% 
+  kable_styling(latex_options = 'hold_position',position = 'center')
+```
+
+```{r over-sampling-charts, fig.cap='Results of Over-Sampling Tuning'}
+lr_results$plot + lda_results$plot + qda_results$plot
+```
+
+
+Finally, the models were finalized using the optimal over-sampling ratio, and then trained using ten-fold cross validation, the results are summarized in the table below.
+```{r finalize-workflows}
+logreg_wf <- logreg_wf %>% 
+  finalize_workflow(parameters = lr_results$best)
+
+lda_wf <- lda_wf %>% 
+  finalize_workflow(parameters = lda_results$best)
+
+qda_wf <- qda_wf %>% 
+  finalize_workflow(parameters = qda_results$best)
+```
+
+
+```{r training-cv_metrics, results='asis'}
+logreg_cv <- fit_resamples(logreg_wf,resamples,metrics = custom_metrics,control = cv_control)
+lda_cv <- fit_resamples(lda_wf,resamples,metrics=custom_metrics,control=cv_control)
+qda_cv <- fit_resamples(qda_wf,resamples,metrics=custom_metrics,control=cv_control)
+
+cv_metrics <- bind_rows(
+  collect_metrics(logreg_cv) %>% mutate(model='Logistic Regression'),
+  collect_metrics(lda_cv) %>% mutate(model='LDA'),
+  collect_metrics(qda_cv) %>% mutate(model='QDA')
+) %>% 
+  select(-.estimator,-n,-.config) %>% 
+  pivot_wider(names_from = .metric,
+              values_from = c(mean,std_err))
+```
+
+```{r cv-metrics-table, results='asis'}
+cv_metrics %>% 
+  rename(avgAccuracy = mean_accuracy,avgFmeas=mean_f_meas,avgAUC = mean_roc_auc,StDevAccuracy = std_err_accuracy,StDevFmeas = std_err_f_meas,StDevAUC = std_err_roc_auc) %>%
+  kbl(caption = 'Summary of Cross Validation Metrics') %>% 
+  kable_styling(latex_options = 'hold_position',position = 'center')
+```
+
+```{r}
+best_model <- cv_metrics[cv_metrics$mean_f_meas==max(cv_metrics$mean_f_meas),1]
+```
+
+The metrics in the table above show that `r best_model` performs best on the cross validation. However, before drawing too many conclusions, a threshold scan will be used to find the threshold with the best F-Measure.
+
+### Threshold Selection
+
+```{r threshold-scan-training, include=F}
+threshold_scan_cv <- function(model_cv, data, model_name) {
+    threshold_data <- model_cv %>% 
+      fit_best() %>% 
+      augment(data) %>% 
+        probably::threshold_perf(truth = Tarp, estimate = .pred_Tarp,
+            thresholds=seq(0.01, 0.99, 0.01), event_level="first",
+            metrics=metric_set(f_meas))
+    opt_threshold <- threshold_data %>%
+        arrange(-.estimate) %>%
+        first()
+    g <- ggplot(threshold_data, aes(x=.threshold, y=.estimate)) +
+        geom_line() +
+        geom_point(data=opt_threshold, color="red", size=2) +
+        labs(title=model_name, x="Threshold", y="F Measurement") +
+        coord_cartesian(ylim=c(0.01, 0.9))
+    return(list(
+        graph=g,
+        threshold=opt_threshold %>%
+            pull(.threshold)
+    ))
+}
+
+g1 <- threshold_scan_cv(logreg_cv, train, "Logistic regression")
+g2 <- threshold_scan_cv(lda_cv, train, "LDA")
+g3 <- threshold_scan_cv(qda_cv, train, "QDA")
+
+traingraphs <- (g1$graph + g2$graph + g3$graph) + plot_annotation(tag_level = 'new')
+```
+
+```{r threshold-scan-testing, include=F}
+g1 <- threshold_scan_cv(logreg_cv, test, "Logistic regression")
+g2 <- threshold_scan_cv(lda_cv, test, "LDA")
+g3 <- threshold_scan_cv(qda_cv, test, "QDA")
+
+lr_thresh <- g1$threshold
+lda_thresh <- g2$threshold
+qda_thresh <- g3$threshold
+
+testgraphs <- g1$graph + g2$graph + g3$graph + plot_annotation(tag_level = 'new')
+```
+
+```{r thresh-graphs, fig.height=4, fig.cap='Model Performance at different thresholds. A, B, and C are for the training data set, and D, E, and F are for the testing dataset'}
+(traingraphs / testgraphs) + plot_annotation(tag_levels = 'A')
+```
+
+The plots in Figure \@ref(fig:thresh-graphs) show the results of threshold scanning. The plots on the top row show the results on training data and those on the bottom row show the results on testing data. Immediately it is clear that LDA does not perform as well as the Logistic regression or QDA. Between Logistic Regression and QDA it is difficult to tell from the plots alone which one performed better. The selected thresholds are shown below in Table \@ref(tab:selected-thresholds). The threshold with the best performance on testing data was chosen, since this would be more representative of how the model would perform on new data.
+
+```{r selected-thresholds, results='asis'}
+tibble(Model = c('Logistic Regression', 'LDA' ,'QDA'), Threshold = c(lr_thresh,lda_thresh,qda_thresh)) %>% 
+  kbl(caption = 'Selected Thresholds') %>% 
+  kable_styling(latex_options = 'hold_position',position = 'center')
+```
+
+
+## ROC Curves & Performance Metrics
+
+Model performance summarized in one or more tables or figures. Expected information shown: 
+
+* ROC curves and AUC  
+
+The receiver operator curve, or ROC curve shows how well the model can distinguish between two results in a classification problem. If the curve is a straight diagonal line with slope one, this means that the model is no better or worse at determining an observations class than random selection. If the curve is above this line, and closer to the top left of the plot, this means that the model is better than a random selection. An ROC curve below this line indicates performance worse than random selection, and indicates something is wrong with the model.
+
+Below in Figure \@ref(fig:roc-curves), the ROC curves for testing and training data are displayed. Additionally, the performance metrics for each model are shown below in Table \@ref(tab:metrics-at-threshold).
+
+```{r roc-curve-train, fig.cap='ROC Curves on Training Data'}
+roc_cv_data <- function(model_cv) {
+    cv_predictions <- collect_predictions(model_cv)
+    cv_predictions %>%
+        roc_curve(truth=Tarp, .pred_Tarp, event_level="first")
+}
+roctrain <- bind_rows(
+    roc_cv_data(logreg_cv) %>% mutate(model="Logistic regression"),
+    roc_cv_data(lda_cv) %>% mutate(model="LDA"),
+    roc_cv_data(qda_cv) %>% mutate(model="QDA")
+) %>%
+ggplot(aes(x=1 - specificity, y=sensitivity, color=model)) +
+    geom_line(show.legend = F)+
+    geom_abline(linetype = 'dashed')+
+  labs(title='Training')
+```
+
+```{r predictions, warning=FALSE}
+logreg_pred <- logreg_cv %>% fit_best() %>%  augment(test)
+lda_pred <- lda_cv %>% fit_best() %>%  augment(test)
+qda_pred <- qda_cv %>% fit_best() %>%  augment(test)
+```
+
+```{r roc-testdata, fig.cap='ROC Curves on Testing Data'}
+roctest <- bind_rows(
+    roc_curve(logreg_pred,truth=Tarp, .pred_Tarp, event_level="first") %>% mutate(model="Logistic regression"),
+    roc_curve(lda_pred,truth=Tarp, .pred_Tarp, event_level="first") %>% mutate(model="LDA"),
+    roc_curve(qda_pred,truth=Tarp, .pred_Tarp, event_level="first") %>% mutate(model="QDA")
+) %>%
+ggplot(aes(x=1 - specificity, y=sensitivity, color=model)) +
+    geom_line()+
+    geom_abline(linetype = 'dashed')+
+  labs(title='Testing')
+```
+
+```{r roc-curves, fig.cap='ROC Curves on training and testing data.'}
+roctrain + roctest
+```
+
+```{r thresh-preds}
+predict_at_threshold <- function(model, data, threshold) {
+    return(
+        model %>%
+            augment(data) %>%
+            mutate(.pred_class = probably::make_two_class_pred(.pred_Tarp,
+                    c("Tarp", "Not Tarp"), threshold=threshold)
+            )
+    )
+}
+
+lr_test_pred <- predict_at_threshold(logreg_cv %>% fit_best(),test,lr_thresh)
+lda_test_pred <- predict_at_threshold(lda_cv %>% fit_best(),test,lda_thresh)
+qda_test_pred <- predict_at_threshold(qda_cv %>% fit_best(),test,qda_thresh)
+```
+
+```{r metrics-at-threshold}
+custom_metrics <- metric_set(f_meas)
+
+calculate_metrics_at_threshold <- function(model, train, test, model_name, threshold) {
+    bind_rows(
+        # Accuracy of training set
+        bind_cols(
+            model=model_name, dataset="train", threshold=threshold,
+            custom_metrics(predict_at_threshold(model, train, threshold), truth=Tarp, estimate=.pred_class),
+        ),
+        # AUC of ROC curve of training set
+        bind_cols(
+            model=model_name, dataset="train", threshold=threshold,
+            roc_auc(model %>% augment(train), Tarp, .pred_Tarp, event_level="first"),
+        ),
+        # Accuracy of holdout set
+        bind_cols(
+            model=model_name, dataset="test", threshold=threshold,
+            custom_metrics(predict_at_threshold(model, test, threshold), truth=Tarp, estimate=.pred_class),
+        ),
+        # AUC of ROC curve of holdout set
+        bind_cols(
+            model=model_name, dataset="test", threshold=threshold,
+            roc_auc(model %>% augment(test), Tarp, .pred_Tarp, event_level="first"),
+        ),
+    )
+}
+
+metrics_at_threshold <- bind_rows(
+    calculate_metrics_at_threshold(logreg_cv %>% fit_best(), train, test, "Logistic regression", lr_thresh),
+    calculate_metrics_at_threshold(lda_cv %>% fit_best(), train, test, "LDA", lda_thresh),
+    calculate_metrics_at_threshold(qda_cv %>% fit_best(), train, test, "QDA", qda_thresh),
+) %>% arrange(dataset) %>% 
+  pivot_wider(names_from = c(.metric,dataset),
+              values_from = .estimate) %>% 
+  select(-.estimator)
+
+metrics_at_threshold %>% 
+  kbl(format = 'latex', caption = 'Model Performance at Optimal Threshold') %>% 
+  kable_styling(latex_options = 'hold_position',position = 'center')
+```
+
+From these results, it is clear that Logistic Regression is the winner. Logistic Regression performs better in terms of F-measure as well ROC AUC on the testing data. Also, the performance of logistic regression does not change much between training and testing sets. This indicates that there is no over-fitting going on here. Interestingly, LDA performs slightly better on testing data than it does on the training data, but it is still far worse than logistic regression and QDA. Finally, the F-measure and ROC AUC are both very good for logistic regression. An F-measure of above 0.9 is generally considered very good. And a ROC AUC of 1 indicates perfect performance, which logistic regression is just shy of. Although, the ROC AUC is likely very high since the data set is imbalanced.
+
+```{r confusion_matrices, include=F}
+lr_test_pred %>% conf_mat(truth = Tarp,estimate = .pred_class)
+lda_test_pred %>% conf_mat(truth = Tarp,estimate = .pred_class)
+qda_test_pred %>% conf_mat(truth = Tarp,estimate = .pred_class)
+```
+
+```{r final-metrics}
+custom_metrics <- metric_set(accuracy,sensitivity,specificity,precision)
+
+more_metrics <- function(model, train, test, threshold, name) {
+  bind_rows(custom_metrics(predict_at_threshold(model %>% fit_best(),train,threshold), truth=Tarp, estimate=.pred_class) %>% 
+  select(-.estimator) %>% 
+  mutate(model = name, data = 'Train') %>% 
+  pivot_wider(names_from = .metric,
+              values_from = .estimate),
+  custom_metrics(predict_at_threshold(model %>% fit_best(),test,threshold), truth=Tarp, estimate=.pred_class) %>% 
+  select(-.estimator) %>% 
+  mutate(model = name, data = 'Test') %>% 
+  pivot_wider(names_from = .metric,
+              values_from = .estimate)
+  )%>% 
+    rename(TPR = sensitivity) %>% 
+    mutate(FPR = 1-specificity) %>% 
+    select(-specificity)
+}
+
+final_metrics <- bind_rows(more_metrics(logreg_cv,train,test,lr_thresh,'Logistic Regression'),
+          more_metrics(lda_cv,train,test,lda_thresh,'LDA'),
+          more_metrics(qda_cv,train,test,qda_thresh,'QDA')
+)
+
+final_metrics %>% kbl(caption = 'Accuracy, TPR, FPR, and Precision at selected threshold.') %>% 
+  kable_styling(latex_options = 'hold_position',position = 'center')
+```
+
+Table \@ref(tab:final-metrics) shows the accuracy, true positive rate (TPR), precision, and false positive rate (FPR). From these metrics it is again clear that logistic regression and QDA reign supreme over LDA. Across the board, LDA performs markedly worse than QDA and logistic regression. The true positive rate of logistic regression is much better than the others, almost 5\% better than QDA and about 10\% better than LDA. QDA outperformed logistic regression in precision and false positive rate. Both of these metrics show that QDA would incorrectly classify a non-shelter as an actual shelter less often than logistic regression. However, the higher true positive rate of logistic regression outweighs the disadvantages that come along with it in terms of false positive rate and precision. In context, it is better to correctly identify and locate more people in need of aid even if it means there will be a slight increase in incorrectly identifying non-shelters as actual shelters.
+
+# Finding Makeshift Shelters in Holdout Set
+
+Now that all the models have been tuned and the optimal threshold selected, it is clear that logistic regression is best suited for this problem. To that end, the finalized logistic regression model was used to predict where makeshift shelters may be located using the holdout set. The results of these predictions are shown below in Figure \@ref(fig:pred-maps).
+
+```{r}
+all_holdout <- holdout_combo %>% 
+  unnest(data) %>% 
+  rename(Red=B1,Green=B2,Blue=B3)
+
+#predictions for all holdout
+holdout_pred <- predict_at_threshold(logreg_cv %>% fit_best(),all_holdout,lr_thresh)
+
+total.found <- holdout_pred %>% 
+  filter(.pred_class=='Tarp') %>% 
+  select(.pred_Tarp,lat,lon,Red,Green,Blue) %>% 
+  nrow()
+
+holdout_pred <- holdout_pred %>% 
+  select(.pred_class,.pred_Tarp,`.pred_Not Tarp`,path,lat,lon,Red,Green,Blue) %>% 
+  nest(data = c(.pred_class,.pred_Tarp,`.pred_Not Tarp`,lat,lon,Red,Green,Blue))
+```
+
+```{r make_pred_map}
+make_pred_map <- function(data,title, maptype = 'satellite', zoom = 18) {
+  bounds <- c(left = min(data$lon),right = max(data$lon),bottom = min(data$lat),top = max(data$lat))
+  center <- c(lon = (min(data$lon)+max(data$lon))/2,lat = (min(data$lat)+max(data$lat))/2)
+  g_haiti <- ggmap(get_map(location=center,zoom=zoom,maptype = maptype,source = 'google'))
+  
+  data <- data %>% 
+    filter(.pred_class=='Tarp')
+  
+  g_haiti+
+    geom_contour(data=data,aes(x=lon,y=lat,z=.pred_Tarp,color='red'),bins = 20,show.legend = F)+
+    labs(title=title, x='Longitude',y='Latitude')
+}
+```
+
+```{r hold_maps}
+hold1map <- make_pred_map(holdout_pred[[2]][[1]],'Area 1',zoom = 19)
+
+#hold2map <- make_pred_map(holdout_pred[[2]][[2]],'holdout2')
+
+hold3map <- make_pred_map(holdout_pred[[2]][[3]],'Area 3')
+
+#hold4map <- make_pred_map(holdout_pred[[2]][[4]],'holdout4')
+
+hold5map <- make_pred_map(holdout_pred[[2]][[5]],'Area 4')
+
+#hold6map <- make_pred_map(holdout_pred[[2]][[6]],'holdout6')
+
+hold7map <- make_pred_map(holdout_pred[[2]][[7]],'Area 7')
+```
+
+```{r pred-maps, fig.height=6, fig.width=9, warning=F, fig.cap='Predicted locations of makeshift villages, shown in red.'}
+hold1map + hold3map + hold5map + hold7map
+```
+
+The maps in Figure \@ref(fig:pred-maps) show the predicted locations of makeshift villages shown in red. Only four of the seven are shown here since the locations in the other areas are more difficult to distinguish due to scale. These maps only show some of the predicted locations of makeshift shelters from the holdout dataset. In total, `r total.found` coordinates with potential makeshift shelters were identified from the holdout dataset.
+
+# Conclusions
+
+Three or more clearly identifiable conclusions. This section is more important than the previous sections (as reflected in the points). Give sufficient explanation and justification for each conclusion.
+
+One conclusion must be:  
+
+* determination and justification of which algorithm works best.  
+Additional conclusions should be observations you’ve made based on your work on this project, such as:  
+
+  * What additional recommend actions can be taken to improve results?  
+  * Were there multiple adequately performing methods, or just one clear best method? What is your level of confidence in the results?  
+  * What is it about this data formulation that allows us to address it with predictive modeling tools?  
+  * How effective do you think your work here could actually be in terms of helping to save human life?  
+  * Do these data seem particularly well-suited to one class of prediction methods, and if so, why? 
+  
+These are only suggestions, pursue your own interests. Your best two additional conclusions will be graded.  
+Make sure that the 3 conclusions are clearly separated.
+
+## Best Algorithm
+
+The best model turned out to be logistic regression with a threshold of `r lr_thresh` and an over-sampling ratio of `r lr_results$best$over_ratio`. It was clear that this model worked best for the problem since it performed the best on both training and testing data in terms of F-measure, meaning it had a good balance between finding people in need and not mistaking noise for makeshift shelters. This model also performed best in terms of true positive rate, meaning it was able to identify the greatest proportion of actual makeshift shelters, about 5\% more than the next best performing model. This means that more people would get the help they need, making logistic regression the clear winner.
+
+## 
+
+## Recommendations to Further Improve Results
+
+
+
+```{r}
+stopCluster(cl)
+registerDoSEQ()
+```

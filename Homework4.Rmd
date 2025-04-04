@@ -1,0 +1,364 @@
+---
+title: "Homework4"
+author: "Patrick Foster"
+date: "2025-02-09"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_chunk$set(cache=TRUE, autodep=TRUE)
+knitr::opts_chunk$set(fig.align="center", fig.pos="h")
+```
+
+```{r libraries, include=FALSE, echo=FALSE,message=FALSE,warning=FALSE}
+library(tidymodels)
+library(tidyverse)
+library(discrim)
+library(patchwork)
+library(probably)
+```
+
+## 1. Diabetes Dataset  
+
+First we start a cluster for faster parallel computing. 
+
+```{r setup-parallel}
+#| cache: FALSE
+#| message: false
+#| warning: FALSE
+library(doParallel)
+cl <- makePSOCKcluster(parallel::detectCores(logical = FALSE))
+registerDoParallel(cl)
+```
+
+### 1.1 Load the Data  
+
+```{r Data, include=TRUE}
+
+data <- read_csv("https://gedeck.github.io/DS-6030/datasets/diabetes/diabetes_binary_5050split_health_indicators_BRFSS2015.csv.gz", 
+                 show_col_types = F)
+
+data_clean <- data %>% 
+  mutate(
+    Diabetes_binary = as.factor(if_else(Diabetes_binary>0,"Healthy","Diabetes")),
+    HighBP = as.factor(if_else(HighBP>0,"yes","no")),
+    HighChol = as.factor(if_else(HighChol>0, "yes","no")),
+    CholCheck = as.factor(if_else(CholCheck>0, "yes","no")),
+    Smoker = as.factor(if_else(Smoker>0, "yes", "no")),
+    Stroke = as.factor(if_else(Stroke>0, "yes", "no")),
+    HeartDiseaseorAttack = as.factor(if_else(HeartDiseaseorAttack>0, "yes", "no")),
+    PhysActivity = as.factor(if_else(PhysActivity>0, "yes", "no")),
+    Fruits = as.factor(if_else(Fruits>0, "yes","no")),
+    Veggies = as.factor(if_else(Veggies>0, "yes", "no")),
+    HvyAlcoholConsump = as.factor(if_else(HvyAlcoholConsump>0, "yes", "no")),
+    AnyHealthcare = as.factor(if_else(AnyHealthcare>0, "yes", "no")),
+    NoDocbcCost = as.factor(if_else(NoDocbcCost>0, "yes","no")),
+    GenHlth = as.factor(if_else(GenHlth<4, "good", "bad")),
+    MentHlth = as.numeric(MentHlth),
+    PhysHlth = as.numeric(PhysHlth),
+    DiffWalk = as.factor(if_else(DiffWalk>0, "yes", "no")),
+    Sex = as.factor(if_else(Sex>0,"male", "female")),
+    Age = as.factor(if_else(Age>8, "old", "young")),
+    Education = as.factor(case_when(
+      Education <= 2~"Low",
+      Education > 2 & Education <= 4  ~ "Med",
+      Education >= 5 ~ "High"
+    )),
+    Income = as.factor(if_else(Income>5, "high", "low"))
+    
+  )
+
+```  
+
+I have changed the data slightly, mostly so that everything that is binary gets a factor with some classification. A few of the numeric variables I have changed to be factors. Namely Age, Education, and Income.  
+
+* Age: I classified any one older than 60 as old.
+* Education: Three way split into Low, Med, and High.
+* Income: Anyone making more than $35k a year is consider "high"
+* GenHlth: Anyone with a Health of fair or poor is considered
+
+### 1.2 Data Split  
+
+```{r split, include=TRUE}
+
+set.seed(126)
+
+diabetes_split <- initial_split(data_clean, prop=0.5, strata=Diabetes_binary)
+train <- training(diabetes_split)
+holdout <- testing(diabetes_split)
+```
+
+I created a fifty-fifty split, and made sure there were an equal number of the two classes using the strata parameter.  
+
+### 1.3 Logistic Regression  
+
+First we must pre-processs, and define the workflows.
+
+
+```{r pre_process}
+formula <- Diabetes_binary~.
+
+diabetes_recipe <- recipe(formula, data=train) %>%
+    step_normalize(all_numeric_predictors())
+```
+
+```{r speciy_workflows}
+logreg_spec <- logistic_reg(mode="classification", engine="glm")
+lda_spec <- discrim_linear(mode="classification", engine="MASS")
+qda_spec <- discrim_quad(mode="classification", engine="MASS")
+```
+
+```{r logreg}
+logreg_wf <- workflow() %>%
+    add_recipe(diabetes_recipe) %>%
+    add_model(logreg_spec)
+```
+
+Now we can create the 10 fold cross-validation.  
+
+```{r cross}
+resamples <- vfold_cv(train, v=10, strata=Diabetes_binary)
+custom_metrics <- metric_set(roc_auc, accuracy)
+cv_control <- control_resamples(save_pred=TRUE)
+```   
+
+```{r log_Cross}
+logreg_cv <- fit_resamples(logreg_wf, resamples, metrics=custom_metrics, control=cv_control)
+```
+
+```{r log_metrics}
+collect_metrics(logreg_cv) %>% 
+  select(.metric, mean, std_err) %>% 
+  knitr::kable(caption = 
+                 "Cross Validation for Logistic Regression on Training Data",
+               digits = 3)
+```
+
+Here we can see that the logistic regression has a mean accuracy of .74 and a mean roc_auc of .82.  
+
+### 1.4 Create LDA and QDA models  
+
+We can use the same process from _1.3_ to create LDA and QDA models.  
+
+```{r more_workflows}
+
+
+lda_wf <- workflow() %>%
+    add_recipe(diabetes_recipe) %>%
+    add_model(lda_spec)
+
+qda_wf <- workflow() %>%
+    add_recipe(diabetes_recipe) %>%
+    add_model(qda_spec)
+```
+
+
+```{r}
+lda_cv <- fit_resamples(lda_wf, resamples, metrics=custom_metrics, control=cv_control)
+qda_cv <- fit_resamples(qda_wf, resamples, metrics=custom_metrics, control=cv_control)
+```
+
+
+```{r metrics}
+
+cv_metrics <- bind_rows(
+    collect_metrics(logreg_cv) %>%
+        mutate(model="Logistic regression"),
+    collect_metrics(lda_cv) %>%
+        mutate(model="LDA"),
+    collect_metrics(qda_cv) %>%
+        mutate(model="QDA")
+)
+
+cv_metrics %>%
+    select(model, .metric, mean) %>%
+    pivot_wider(names_from=".metric", values_from="mean") %>%
+    knitr::kable(caption="Cross-validation performance metrics", digits=3)
+```  
+
+Here we can see that of the three models we have, the accuracy is best with the Logistic/LDA and the ROC_AUC is the best with the Logistic Regression. So in this case I would use the logistic regression.  
+
+### 1.5  Plots  
+
+Using the code from class to create a visual for the three ROC curves we get:  
+
+```{r cv-roc-curves-overlay}
+#| fig.width: 5
+#| fig.height: 3
+#| fig.cap: Overlay of cross-validation ROC curves
+roc_cv_data <- function(model_cv) {
+    cv_predictions <- collect_predictions(model_cv)
+    cv_predictions %>%
+        roc_curve(truth=Diabetes_binary, .pred_Diabetes, event_level="first")
+}
+bind_rows(
+    roc_cv_data(logreg_cv) %>% mutate(model="Logistic regression"),
+    roc_cv_data(lda_cv) %>% mutate(model="LDA"),
+    roc_cv_data(qda_cv) %>% mutate(model="QDA")
+) %>%
+ggplot(aes(x=1 - specificity, y=sensitivity, color=model)) +
+    geom_line()+
+    geom_abline(linetype = "dashed")
+```
+
+Here we see that between the Logistic Regression and LDA it is largely the same, whereas QDA seems to do worse than both of the other models. So I would use logistic regression as it easier seems to do just as well as LDA and it is usually easier to explain how each predictor affects the overall model.  
+
+### 1.6 Test Set  
+
+We can use the same code from above to look at how the models will perform on the test set, all we need to do is change the recipe so that it uses the holdout set instead of the training set.  
+
+```{r test_recipe}
+diabetes_test_recipe <- recipe(formula, data=holdout) %>%
+    step_normalize(all_numeric_predictors())
+```
+
+```{r test_workflows}
+logreg_test_wf <- workflow() %>%
+    add_recipe(diabetes_test_recipe) %>%
+    add_model(logreg_spec)
+
+lda_test_wf <- workflow() %>%
+    add_recipe(diabetes_test_recipe) %>%
+    add_model(lda_spec)
+
+qda_test_wf <- workflow() %>%
+    add_recipe(diabetes_test_recipe) %>%
+    add_model(qda_spec)
+
+```
+
+```{r}
+logreg_cv_test <- fit_resamples(logreg_test_wf, resamples, 
+                                metrics=custom_metrics, control=cv_control)
+lda_cv_test <- fit_resamples(lda_test_wf, resamples, 
+                             metrics=custom_metrics, control=cv_control)
+qda_cv_test <- fit_resamples(qda_test_wf, resamples, 
+                             metrics=custom_metrics, control=cv_control)
+
+```
+
+```{r metrics_test}
+
+cv_metrics <- bind_rows(
+    collect_metrics(logreg_cv_test) %>%
+        mutate(model="Logistic regression"),
+    collect_metrics(lda_cv_test) %>%
+        mutate(model="LDA"),
+    collect_metrics(qda_cv_test) %>%
+        mutate(model="QDA")
+)
+
+cv_metrics %>%
+    select(model, .metric, mean) %>%
+    pivot_wider(names_from=".metric", values_from="mean") %>%
+    knitr::kable(caption="Cross-validation performance metrics on Test Data", 
+                 digits=3)
+```
+
+Here we see that in this case the accuracy obviously decreases across all the models, however with the 10 cross validations the ROC stays the same from the training to the test data.  
+
+## 2. Estimate using Bootstrap  
+
+### 2.1 MTCars and Bootstrap  
+
+First we must read in the data, and change some of the variables to factors.  
+
+```{r cars}
+cars <- mtcars %>% 
+  as_tibble(rownames = "car") %>% 
+  mutate(
+    vs = factor(vs, labels=c("V-shaped", "straight")),
+    am = factor(am, labels=c("automatic", "manual")),
+  )
+```
+
+Then we set the formula and create the workflow  
+
+
+```{r}
+set.seed(126)
+resamples <- rsample::bootstraps(cars, times = 1000)
+
+formula <- mpg ~ cyl + disp + hp + drat + wt + qsec + vs + am + gear + carb
+
+lin_rec <- recipe(formula, data = cars) %>% 
+  step_normalize(all_numeric_predictors())
+
+lm_model <- linear_reg() %>%
+    set_engine("lm")
+
+lin_wf <- workflow() %>% 
+    add_recipe(lin_rec) %>%
+    add_model(lm_model)
+
+lin_fit_boot <- lin_wf %>% 
+  fit_resamples(resamples, control=control_resamples(save_pred=TRUE))
+
+```
+
+```{r}
+boot_metrics <- metric_set(rmse,mae)
+
+metrics_new <- collect_metrics(lin_fit_boot)
+
+metrics_new %>% 
+  select(.metric,mean,std_err) %>% 
+  knitr::kable(caption = "Performace Metrics for Bootstrap with n=1000", digits = 3)
+```  
+
+Here we see that the RMSE and MAE of the metrics.  
+
+### 2.2 Distributions of the Metrics  
+
+Using the code from the course notes we can create a visualization of the metrics for the bootstraps.  
+
+```{r distributions}
+quantiles <- lin_fit_boot %>%
+    collect_metrics(summarize=FALSE) %>%
+    group_by(.metric) %>%
+    summarize(
+        q0.025 = quantile(.estimate, 0.025),
+        median = quantile(.estimate, 0.5),
+        q0.975 = quantile(.estimate, 0.975)
+    )
+
+lin_fit_boot %>%
+    collect_metrics(summarize=FALSE) %>%
+ggplot(aes(x=.estimate)) +
+    geom_histogram(bins=100) +
+    facet_wrap(~.metric, scales="free") +
+    geom_vline(data=quantiles, aes(xintercept=median), color="blue") +
+    geom_vline(data=quantiles, aes(xintercept=q0.025), color="blue", linetype="dashed") +
+    geom_vline(data=quantiles, aes(xintercept=q0.975), color="blue", linetype="dashed")
+```
+Both of the distributions are very skewed, with the RMSE we have a distribution that has outliers to the high end. And with R squared we have outliers on the low end.  
+
+### 2.2 Confidence Intervals for MAE and RMSE  
+
+We can adapt our above code in order to get the CIs for the bootsrap metrics.
+
+```{r}
+quantiles <- lin_fit_boot %>%
+    collect_metrics(summarize=FALSE) %>%
+    group_by(.metric) %>%
+    summarize(
+        low_ci = quantile(.estimate, 0.025),
+        median = quantile(.estimate, 0.5),
+        high_ci = quantile(.estimate, 0.975)
+    )
+
+quantiles %>% 
+  select(.metric, low_ci, high_ci) %>% 
+  knitr::kable(caption = "CIs for RMSE and MAE", digits = 3)
+```
+
+We can see the CI for the metrics above.  
+
+
+
+
+```{r}
+stopCluster(cl)
+registerDoSEQ()
+```

@@ -1,0 +1,339 @@
+---
+title: "Module2"
+author: "Patrick Foster"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE, autodep=TRUE, fig.align="center")
+```
+
+```{r}
+#| message: FALSE
+#| warning: FALSE
+library(tidyverse)
+library(tidymodels)
+library(ggcorrplot)  # for correlation plot
+library(GGally)  # scatterplot matrix
+library(patchwork)  # for combining plots
+library(ggfortify)
+library(kableExtra)
+library(car)
+library(GGally)
+```
+
+## 1. Flexibile vs Inflexible  
+
+### 1.1  
+A flexible model would be best here. With a large sample number and small number of predictors. With a large number of observations an accurate model can be creasted from a flexible model 
+
+### 1.2  
+A Inflexible method would be preferred here. The opposite of what was said above.  
+
+### 1.3  
+Flexible would be preferred, a linear model would be difficult as trying to draw any sort of line may lead to bias.  
+
+### 1.4  
+Inflexible would be preferred, as variance increases more as you increase the flexibility of the model. 
+
+## 2. Airfare on New Routes 
+
+### 2.1 Load the Data
+
+```{r load}
+data <- read.csv("Airfares.csv")
+```
+
+### pre-process
+
+
+```{r}
+df <- data %>% 
+  select(-c(S_CODE,S_CITY,E_CODE,E_CITY)) %>% 
+  mutate(
+    VACATION = factor(VACATION),
+    SW = factor(SW),
+    SLOT = factor(SLOT),
+    GATE = factor(GATE)
+  ) %>% 
+  relocate(FARE)
+
+```
+
+### 2.2 Correlation table.
+
+```{r}
+corr <- df %>% 
+    select(where(is.numeric)) %>%
+    cor()
+ggcorrplot(corr)
+```  
+
+Here we see all predictors have a positive correlation with FARE, the largest being Distance, COUPON,EPOP, and EINCOME
+
+Now we can look at some scatter plots from these variables.   
+
+```{r}
+df %>% 
+    select(where(is.numeric)) %>%
+    pivot_longer(!FARE, names_to='variable', values_to='value') %>%
+ggplot(aes(x=value, y=FARE)) +
+    geom_point() +
+    geom_smooth(method="lm", se = F)+
+    facet_wrap(~variable, scales='free')
+```
+
+Distance seems to have the largest affect on Fare, it increases linearly. Coupon also seems to have an affect on the FARE, although not linearly. The following variables should be transformed:  
+
+* Coupon - Log and SQRT
+* Incomes - Log
+* Pops - Log
+* Pax - Log
+* New - categorical with 4 levels 
+* FARE - Log
+
+```{r}
+df <- df %>% 
+  mutate(
+    COUPON = sqrt(log(COUPON)),
+    E_INCOME = log(E_INCOME),
+    E_POP = log(E_POP),
+    PAX = log(PAX),
+    S_INCOME = log(S_INCOME),
+    S_POP = log(S_POP),
+    NEW = factor(case_when(
+      NEW == 0 ~ "0",
+      NEW == 1 ~ "1",
+      NEW == 2 ~ "2",
+      NEW == 3 ~ "3"
+    )),
+    FARE = log(FARE)
+  )
+```
+
+```{r}
+df %>% 
+    select(where(is.numeric)) %>%
+    pivot_longer(!FARE, names_to='variable', values_to='value') %>%
+ggplot(aes(x=value, y=FARE)) +
+    geom_point() +
+    geom_smooth(method="lm", se = F)+
+    facet_wrap(~variable, scales='free')
+```
+
+The transformations seem to have helped linearize the data.  
+
+
+### 2.3 categorical predictors 
+
+```{r}
+df %>% 
+    select(!where(is.numeric), FARE) %>%
+    pivot_longer(!FARE, names_to='variable', values_to='value') %>%
+ggplot(aes(x=value, y=FARE)) +
+    geom_boxplot() +
+    facet_wrap(~variable, scales='free')
+
+
+```
+
+Among the four original categorical variables we can see that SW and Vacation have an affect on the FARE price.  SW seems to have the highest affect on price, the fares are, on average, much lower when SW operates from an airport. This predictor has the biggest change when compared with the other categorical predictors. New was the categorical data that we created earlier. it does not seem to have much affect on FARE.  
+
+### 2.4 Partition the Data 
+
+```{r}
+set.seed(1)
+
+sw_split <- initial_split(df, prop = .75, strata = FARE)
+
+train <- training(sw_split)
+holdout <- testing(sw_split)
+```  
+
+
+### 2.5 Linear regression  
+
+```{r}
+formula <- FARE~COUPON+NEW+VACATION+SW+HI+S_INCOME+E_INCOME+S_POP+E_POP+SLOT+
+  GATE+DISTANCE+PAX
+
+lm_spec <- linear_reg(engine="lm", mode="regression")
+lm_model <- lm_spec %>% fit(formula, data=train)
+```
+
+
+```{r}
+lm_model %>% extract_fit_engine() %>% summary()
+```
+
+From the summary we can see that most of the predictors are significant in this simple linear model, with the exception of the New variables. Let's take a look a plot of the residuals.  
+
+
+
+```{r}
+autoplot(lm_model, which=c(1,2))
+```
+
+Not terrible! Now lets take a look at the performance:  
+
+```{r}
+train_metric<-metrics(augment(lm_model, train), truth=FARE, estimate=.pred) %>% 
+  select(.metric, train_value = .estimate)
+hold_out_metric<-metrics(augment(lm_model, holdout), truth= FARE, 
+                         estimate = .pred) %>% 
+  select(.metric, test_value = .estimate)
+
+combine <- train_metric %>% 
+  inner_join(hold_out_metric, by = ".metric")
+
+combine
+```
+
+The model metrics look pretty good, a RMSE of 2.13 and a MAE of .17 is good. Obviously there is an increase from the training to test values. But it does not seem to overfit, as the model does pretty well on the unseen test data.  
+
+
+### 2.6 Drop predictors  
+
+The predictors to drop would be the New predictors, we can perform a general linear F test to asses this.  
+
+
+```{r}
+formula_reduced <- formula <- (FARE~COUPON+VACATION+SW+HI+S_INCOME+E_INCOME+
+  S_POP+E_POP+SLOT+GATE+DISTANCE+PAX)
+
+reduced_model <- lm_spec %>% fit(formula_reduced, data=train)
+
+anova(reduced_model$fit,lm_model$fit)
+```
+
+We fail to reject the full null hypothesis, we can go with the reduced model and drop the predictor of New.  
+
+We can look at the residual plots and the metrics for this reduced model as well.  
+
+```{r}
+autoplot(reduced_model, which=c(1,2))
+```
+
+The table residual plot look largely the same. Let's see if the metrics have changed.  
+
+```{r}
+train_metric<-metrics(augment(reduced_model, train), truth=FARE, 
+                      estimate=.pred) %>% 
+  select(.metric, train_value = .estimate)
+hold_out_metric<-metrics(augment(reduced_model, holdout), truth= FARE, 
+                         estimate = .pred) %>% 
+  select(.metric, test_value = .estimate)
+
+combine <- train_metric %>% 
+  inner_join(hold_out_metric, by = ".metric")
+
+combine
+```   
+
+The metrics have basically stayed the same, however they did increase slightly.  
+
+### 2.7 Predictions  
+
+```{r}
+newdata <- data.frame(COUPON = 1.202, NEW = 3, VACATION = "No", SW = "No", 
+                      HI = 4442.141, S_INCOME = 28,760, E_INCOME = 27664, 
+                      S_POP = 4557004, E_POP = 3195503, SLOT = "Free", 
+                      GATE = "Free", PAX = 12782, DISTANCE = 1976)
+
+newdata <- newdata %>% 
+  mutate(
+    COUPON = sqrt(log(COUPON)),
+    E_INCOME = log(E_INCOME),
+    E_POP = log(E_POP),
+    PAX = log(PAX),
+    S_INCOME = log(S_INCOME),
+    S_POP = log(S_POP),
+    NEW = factor(case_when(
+      NEW == 0 ~ "0",
+      NEW == 1 ~ "1",
+      NEW == 2 ~ "2",
+      NEW == 3 ~ "3")),
+    VACATION = factor(VACATION),
+    SW = factor(SW),
+    SLOT = factor(SLOT),
+    GATE = factor(GATE)
+  )
+
+```
+
+```{r}
+exp(predict(lm_model, new_data = newdata))
+exp(predict(reduced_model, new_data = newdata))
+```  
+
+These predicted values seem rather low for the new-data provided.  
+
+### 2.8 Smaller Model if SW  
+
+```{r}
+newdata2 <- data.frame(COUPON = 1.202, NEW = 3, VACATION = "No", SW = "Yes", 
+                      HI = 4442.141, S_INCOME = 28,760, E_INCOME = 27664, 
+                      S_POP = 4557004, E_POP = 3195503, SLOT = "Free", 
+                      GATE = "Free", PAX = 12782, DISTANCE = 1976)
+
+newdata2 <- newdata2 %>% 
+  mutate(
+    COUPON = sqrt(log(COUPON)),
+    E_INCOME = log(E_INCOME),
+    E_POP = log(E_POP),
+    PAX = log(PAX),
+    S_INCOME = log(S_INCOME),
+    S_POP = log(S_POP),
+    NEW = factor(case_when(
+      NEW == 0 ~ "0",
+      NEW == 1 ~ "1",
+      NEW == 2 ~ "2",
+      NEW == 3 ~ "3")),
+    VACATION = factor(VACATION),
+    SW = factor(SW),
+    SLOT = factor(SLOT),
+    GATE = factor(GATE)
+  )
+```
+
+```{r}
+exp(predict(reduced_model, new_data = newdata2))
+```  
+
+It drops by 7, from 26 to 19.  
+
+## C. Predictors  
+
+### 2.9 Before flight.  
+
+In this case some of the predictors cannot be known until after the flights start to fly to that particular airport, these are: New, HI, PAX, Coupon. All of these are calculated using data that is only available from existing routes.  
+
+### 2.10 New Factors.  
+
+```{r}
+formula_reduced_further <- formula <- (FARE~VACATION+SW+S_INCOME+E_INCOME+
+  S_POP+E_POP+SLOT+GATE+DISTANCE)
+
+more_reduced_model <- lm_spec %>% fit(formula_reduced_further, data=train)
+```
+
+### 2.11 Good Enough?
+
+```{r}
+train_metric<-metrics(augment(more_reduced_model, train), truth=FARE, 
+                      estimate=.pred) %>% 
+  select(.metric, train_value = .estimate)
+hold_out_metric<-metrics(augment(more_reduced_model, holdout), truth= FARE, 
+                         estimate = .pred) %>% 
+  select(.metric, test_value = .estimate)
+
+combine <- train_metric %>% 
+  inner_join(hold_out_metric, by = ".metric")
+
+combine
+```
+
+With a RMSE of .25 compared to .21 from above I believe that it is not worthwhile for evaluating. The model is pretty good.

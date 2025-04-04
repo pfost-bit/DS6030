@@ -1,0 +1,424 @@
+---
+title: "HomeWork6"
+author: "Patrick Foster"
+date: "2025-02-20"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup}
+#| include: FALSE
+knitr::opts_chunk$set(echo=TRUE, cache=TRUE, autodep=TRUE, fig.align="center", fig.pos="h")
+set.seed(126)
+```
+
+
+```{r load-packages}
+#| message: FALSE
+#| warning: FALSE
+library(tidymodels)
+library(tidyverse)
+library(patchwork)
+```
+
+```{r setup-parallel}
+#| cache: FALSE
+#| message: false
+#| warning: FALSE
+library(doParallel)
+cl <- makePSOCKcluster(parallel::detectCores(logical = FALSE))
+registerDoParallel(cl)
+```
+
+## 1. Predict out of state tuition.  
+
+### 1.1 Load the Data, split.  
+
+First we load the data and split it into a 80/20 training/holdout split.  
+
+```{r load, include = T}
+data <- ISLR2::College
+```
+
+The data consists of 777 observations, where each observation is a specific college/university. They have 18 distinct features that pertain to each of the universities. Here we want to build a model that predicts the out of state tuition for any new observation.  
+
+We can make a simple visualization of the out of state tuition to get an idea on the skewedness of the data.  
+
+```{r}
+#| fig.width: 7
+#| fig.height: 3
+data %>% 
+  ggplot(aes(x=Outstate))+
+  geom_density()+
+  labs(title = "Density Plot of Out of State Tuition",
+       x= "Out of State Tuiton in Dollars",
+       y = "Density")+
+  theme(plot.title = element_text(hjust = .5))
+```
+
+Here we see that the predictor is fairly evenly distributed, with any outliers on the high side of the Tuition.  
+
+```{r split, include=T}
+data_split<- initial_split(data, prop = .8, strata = Outstate)
+train <- training(data_split)
+holdout <- testing(data_split)
+```  
+
+
+
+We now have a training and holdout set.  
+
+```{r}
+#| fig.width: 7
+#| fig.height: 3
+#| 
+g1<-train %>% 
+  ggplot(aes(x=Outstate))+
+  geom_density()+
+  labs(title = "Training",
+       x= "Out of State Tuiton in Dollars",
+       y = "Density")+
+  theme(plot.title = element_text(hjust = .5))
+
+g2<-holdout %>% 
+  ggplot(aes(x=Outstate))+
+  geom_density()+
+  labs(title = "Holdout",
+       x= "Out of State Tuiton in Dollars",
+       y = "Density")+
+  theme(plot.title = element_text(hjust = .5))
+
+p1<-g1+g2
+
+p1+
+  plot_annotation(title = "Density Plots of Out of State Tuition")
+```
+
+Here we see that the general shape of the Data was preserved by specifying the strata variable of `Outstate`.  
+
+
+
+### 1.2 PreProcess the variables.  
+
+```{r}
+formula <- Outstate~.
+
+Out_recipe <- recipe(formula, data = train) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_dummy(all_nominal_predictors())
+```
+
+The data has now been added to a recipe where we have normalized all of the numeric predictors and added dummy variables for all categorical predictors.  
+
+### 1.3 Create a Model and use cross validation.  
+
+```{r}
+
+
+resamples <- vfold_cv(train, v = 10)
+
+linear_model <- linear_reg(mode="regression",penalty = tune(), mixture=1) %>%
+    set_engine("glmnet")
+
+wf <- workflow() %>% 
+  add_recipe(Out_recipe) %>% 
+  add_model(linear_model)
+
+parameters = extract_parameter_set_dials(wf) %>% 
+      update(
+        penalty=penalty(c(.1, 1.5))
+    )
+
+parameters$name
+```
+We have one tunable parameter now, `penalty`.  Now we can create a grid where we tune the penalty to find the best metrics for the final model. I chose a penalty that goes from 10 to 1500. This allows the $\lambda$ to be sufficiently high to force some of the features to go to 0.   
+
+
+```{r}
+tune_results <- tune_grid(wf,
+                          resamples=resamples,
+                          grid = grid_regular(parameters,levels = 50)
+  
+)
+```
+
+
+```{r}
+autoplot(tune_results)
+```
+
+Here we see that the RMSE levels out around 2001 and the rsq maximizes at .75 We can create models that uses each of these metrics as the "best".  
+
+
+### 1.4 Determine the best parameter, and a train a model for each.  
+
+We can see the best model for each of the metrics using the `show_best` function.  
+
+```{r}
+rmse <- show_best(tune_results,metric = "rmse", n = 1)
+r2 <- show_best(tune_results, metric = "rsq", n=1)
+
+combined <- bind_rows(rmse, r2)
+combined %>% 
+  select(penalty, mean, std_err, .metric) %>% 
+  knitr::kable(caption = "Best Penaltys for each metric.", digits = 3)
+```
+
+
+We can now train the model, with each of these best features.  
+
+```{r}
+best_rmse <-  select_best(tune_results,metric="rmse")
+best_rsq <- select_best(tune_results, metric = "rsq")
+
+best_wf_rmse <- wf %>% 
+  finalize_workflow(best_rmse) %>% 
+  fit(train)
+
+best_wf_rsq <- wf %>% 
+  finalize_workflow(best_rsq) %>% 
+  fit(train)
+```
+
+```{r}
+tidy(best_wf_rmse)
+tidy(best_wf_rsq)
+```
+
+In both of these models we see that the predictors of Top25perc and P.Undergrad go to zero. Everything else retains some predictive strength. 
+
+### 1.5 Report the RMSE and R2 on the training and test set.  
+
+I am going to use the model that maximizes the $R^2$, 
+
+```{r}
+predictions <- augment(best_wf_rsq, new_data = holdout)
+
+out <- predictions %>% 
+  metrics(truth = Outstate, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "rsq")) %>% 
+  knitr::kable(caption = "Metrics for Best parameters on test data", digits = 3)
+  
+out
+```
+
+The model performs fairly well on the test data, the RMSE and RSQ are largely the same as when trained on the training data.  
+
+### 1.6 Build a formula spline features.  
+
+We use the formula dropping `Top25Percent` and `P.Undergrad`.  
+
+```{r}
+reduced_formula = Outstate ~ Private + s(Apps) + s(Accept) + s(Enroll) + 
+  s(Top10perc) + s(F.Undergrad) + s(Room.Board) + s(Books) + s(Personal) + 
+  s(PhD) + s(Terminal) + s(S.F.Ratio) + s(perc.alumni) + 
+  s(Expend) + s(Grad.Rate)
+
+```  
+
+We add splines to all numerics.  
+
+### 1.7 Define the GAM.  
+
+Using the code from the textbook we can define the model as follows.  
+
+```{r}
+
+gam_model <- gen_additive_mod() %>% 
+  set_engine("mgcv") %>% 
+  set_mode("regression") %>% 
+  fit(reduced_formula, data = train)
+```  
+
+### 1.8 Report the metrics on training and test data.  
+
+```{r}
+predictions_train <- augment(gam_model, new_data = train)
+predictions_holdout <- augment(gam_model, new_data = holdout)
+
+train_out <- predictions_train %>% 
+  metrics(truth = Outstate, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "rsq"))
+
+holdout_out <- predictions_holdout %>% 
+  metrics(truth = Outstate, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "rsq"))
+         
+final_results <- bind_rows(
+  train_out %>% mutate(set = "Train"),
+  holdout_out %>% mutate(set = "Holdout")
+) %>%
+  pivot_wider(names_from = set, values_from = .estimate) %>% 
+  select(Train,Holdout,.metric) %>% 
+  knitr::kable(caption = "GAM peformance on Training and Holdout Data", digits = 3)
+
+final_results
+```
+
+We see that the $R^2$ and RMSE have both improved when compared to the model from 1.5. The RMSE had decreased and the $R^2$ had increased.  
+
+\newpage
+
+### 1.9 Use the plot function.  
+
+We can use the plot function to look at how each variable is being affected by the splines.  
+
+```{r}
+#| message: F
+library(mgcv)
+
+opar <- par(mfrow=c(3,3))
+plot(gam_model %>% extract_fit_engine(), scale = 0)
+```
+
+We see that the data is not evenly spread, as the datapoints are all clustered on the lower end, the model could be improved by having some function to normalize everything, such as a Yeo_Johnson or a Box-Cox Transformation. Here we see that a lot of the variables benefit from the spline, as they are non-linear. However the variables, `Apps`, `Room.Board`, `Books`, and `perc.alumni` have a linear fit.  
+
+### 1.10 Use the summary function.  
+
+We can use the summary function to get some more information about our spline transformed predictors.  
+```{r}
+summary(gam_model$fit)
+```
+The non-significant terms include:  
+
+* `Enroll`
+* `Books`
+* `PhD`
+* `S.F.Ratio`
+
+We can maybe simplify the model by removing these features. We can use a general linear F test and see the results.  
+
+```{r}
+
+more_reduced_formula <- Outstate ~ Private + s(Apps) + s(Accept)+ 
+  s(Top10perc) + s(F.Undergrad) + s(Room.Board) + s(Personal)  + s(Terminal)+ 
+  s(perc.alumni) + s(Expend) + s(Grad.Rate)
+
+gam_model_reduced <- gen_additive_mod() %>% 
+  set_engine("mgcv") %>% 
+  set_mode("regression") %>% 
+  fit(more_reduced_formula, data = train)  
+
+anova(extract_fit_engine(gam_model_reduced), extract_fit_engine(gam_model), test = "F")
+```
+With the p-value being low, we reject the null hypothesis, the full model is preferred over the reduced model. So we can expect the the reduced model to perform worse.  
+
+### 1.11 Report the Metrics of the reduced GAM.  
+
+We can re-use our code from earlier, and report the metrics with the training and holdout data with the reduced GAM model.  
+
+```{r}
+predictions_train <- augment(gam_model_reduced, new_data = train)
+predictions_holdout <- augment(gam_model_reduced, new_data = holdout)
+
+train_out <- predictions_train %>% 
+  metrics(truth = Outstate, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "rsq"))
+
+holdout_out <- predictions_holdout %>% 
+  metrics(truth = Outstate, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "rsq"))
+         
+final_results <- bind_rows(
+  train_out %>% mutate(set = "Train"),
+  holdout_out %>% mutate(set = "Holdout")
+) %>%
+  pivot_wider(names_from = set, values_from = .estimate) %>% 
+  select(Train,Holdout,.metric) %>% 
+  knitr::kable(caption = "Reduced GAM peformance on Training and Holdout Data", digits = 3)
+
+final_results
+
+```
+
+Here we see that the reduced GAM performed worse on the train data, and performed slightly worse on the test data.  
+
+### 1.12 Compare the Three.  
+
+Now we write a function to compute the metrics for all of the models. And compare and contrast their performance on training and test data.  
+```{r}
+
+# Create a function to generate metrics for a model
+get_metrics <- function(model, train_data, holdout_data, model_name) {
+  predictions_train <- augment(model, new_data = train_data)
+  predictions_holdout <- augment(model, new_data = holdout_data)
+  
+  train_out <- predictions_train %>% 
+    metrics(truth = Outstate, estimate = .pred) %>% 
+    filter(.metric %in% c("rmse", "rsq")) %>%
+    mutate(Set = "Train", Model = model_name)
+  
+  holdout_out <- predictions_holdout %>% 
+    metrics(truth = Outstate, estimate = .pred) %>% 
+    filter(.metric %in% c("rmse", "rsq")) %>%
+    mutate(Set = "Holdout", Model = model_name)
+  
+  bind_rows(train_out, holdout_out)
+}
+
+
+best_model_metrics <- get_metrics(best_wf_rsq, train, holdout, "LASSO")
+gam_model_metrics <- get_metrics(gam_model, train, holdout, "Full GAM")
+reduced_gam_metrics <- get_metrics(gam_model_reduced, train, holdout, "Reduced GAM")
+
+
+final_results <- bind_rows(best_model_metrics, gam_model_metrics, reduced_gam_metrics) %>%
+  pivot_wider(names_from = Set, values_from = .estimate) %>%
+  select(Model, .metric, Train, Holdout) %>%
+  arrange(.metric, Model)
+
+final_results <- final_results %>%
+  mutate(Model = factor(Model, levels = c("LASSO", "Full GAM", "Reduced GAM"))) %>%
+  arrange(Model, .metric)
+
+
+final_results %>% 
+  knitr::kable(caption="Metrics for all of the models", digits = 4)
+```
+
+Here we see that the GAMs so a better job of predictions on the test data than the model selected just by the LASSO. The Full GAM does the best job on the unseen test data, for this reason I would recommend the use of this model. My next step would be to transform the Full GAM using a Yeo_Johnson and see the results.  
+
+```{r}
+rec <- recipe(Outstate~., data = train) %>% 
+  step_YeoJohnson(all_numeric_predictors())
+
+spec <- gen_additive_mod() %>% 
+  set_engine("mgcv") %>% 
+  set_mode("regression")
+
+wf2 <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(spec,formula = reduced_formula )
+
+GAM_Yeo <- wf2 %>% 
+  fit(data = train)
+```
+
+```{r}
+yeo_GAM_metrics <- get_metrics(GAM_Yeo, train, holdout, "Yeo GAM")
+
+final_results <- bind_rows(best_model_metrics, gam_model_metrics, reduced_gam_metrics, yeo_GAM_metrics) %>%
+  pivot_wider(names_from = Set, values_from = .estimate) %>%
+  select(Model, .metric, Train, Holdout) %>%
+  arrange(.metric, Model)
+
+final_results <- final_results %>%
+  mutate(Model = factor(Model, levels = c("LASSO", "Full GAM", "Reduced GAM", "Yeo GAM"))) %>%
+  arrange(Model, .metric)
+
+
+final_results %>% 
+  knitr::kable(caption="Metrics for all of the models with Yeo GAM", digits = 4)
+```
+
+```{r}
+stopCluster(cl)
+registerDoSEQ()
+```

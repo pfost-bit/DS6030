@@ -1,0 +1,372 @@
+---
+title: "Homework7"
+author: "Patrick Foster"
+date: "2025-03-15"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup}
+#| include: FALSE
+knitr::opts_chunk$set(echo=TRUE, cache=TRUE, autodep=TRUE, fig.align="center", fig.pos="h")
+set.seed(126)
+```
+
+
+```{r packages}
+#| message: FALSE
+#| warning: F
+library(tidyverse)
+library(tidymodels)
+library(partykit)
+library(ggparty)
+library(bonsai)
+library(patchwork)
+library(rpart.plot)
+```
+
+```{r setup-parallel}
+#| cache: FALSE
+#| message: false
+#| warning: FALSE
+library(doParallel)
+cl <- makePSOCKcluster(parallel::detectCores(logical = FALSE))
+registerDoParallel(cl)
+```
+
+## 1. The Used Car Dataset  
+
+We are working with a dataset of used cars, specifically Toyota Corollas sold in the summer of 2004, in the Netherlands. We are eventually predict price.
+
+### 1.1 Load and pre-process.  
+
+```{r data, include=TRUE}
+data <- read_csv("https://gedeck.github.io/DS-6030/datasets/homework/ToyotaCorolla.csv.gz",show_col_types = FALSE)
+```  
+
+We must first turn all of columns that are currently a numeric 0,1 into a factor.  
+
+```{r}
+cars <- data %>%
+  select(-Id) %>% 
+  mutate(
+    Fuel_Type = as.factor(Fuel_Type),
+    Met_Color= as.factor(Met_Color),
+    Automatic = as.factor(Automatic),
+    Doors = as.factor(Doors),
+    Cylinders = as.factor(Cylinders),
+    Gears = as.factor(Gears),
+    Mfr_Guarantee = as.factor(Mfr_Guarantee),
+    BOVAG_Guarantee = as.factor(BOVAG_Guarantee),
+    ABS = as.factor(ABS),
+    Airbag_1 = as.factor(Airbag_1),
+    Airbag_2 = as.factor(Airbag_2),
+    Airco = as.factor(Airco),
+    Automatic_airco = as.factor(Automatic_airco),
+    Boardcomputer = as.factor(Boardcomputer),
+    CD_Player = as.factor(CD_Player),
+    Central_Lock = as.factor(Central_Lock),
+    Powered_Windows = as.factor(Powered_Windows),
+    Power_Steering = as.factor(Power_Steering),
+    Radio = as.factor(Radio),
+    Mistlamps = as.factor(Mistlamps),
+    Sport_Model = as.factor(Sport_Model),
+    Backseat_Divider = as.factor(Backseat_Divider),
+    Metallic_Rim = as.factor(Metallic_Rim),
+    Radio_cassette = as.factor(Radio_cassette),
+    Parking_Assistant = as.factor(Parking_Assistant),
+    Tow_Bar = as.factor(Tow_Bar)
+  )
+```
+
+### 1.2 Split into a training and test set. Create a Large Tree  
+
+```{r}
+cars_split <- initial_split(cars, prop = .6, strata = Price)
+train <- training(cars_split)
+holdout <- testing(cars_split)
+```  
+
+Define A workflow:  
+
+```{r}
+formula <- (Price~Age_08_04+KM+Fuel_Type+HP+Automatic+Doors+Quarterly_Tax
++Mfr_Guarantee+Guarantee_Period+Airco+Automatic_airco+CD_Player
++Powered_Windows+Sport_Model+Tow_Bar)
+
+rec <- recipe(formula, data=train)
+
+tree_spec <- decision_tree(engine="rpart", mode="regression",
+                           min_n = 2,
+                           tree_depth = 30,
+                           cost_complexity=.001)
+
+wf_rpart <- workflow() %>%
+    add_recipe(rec) %>%
+    add_model(tree_spec)
+
+```  
+
+
+### 1.3 Fit model and visualize the tree.  
+
+```{r}
+model_rpart <- fit(wf_rpart, data=train)
+png("decision_tree.png", width = 3000, height = 2000, res = 500)
+rpart.plot(model_rpart %>% extract_fit_engine(), type = 3, extra = 101, 
+           under = TRUE, tweak = 1.2, roundint = F)
+
+```
+
+![Tree]("decision_tree.png")  
+
+The tree is fairly deep and we see that it splits many times, it seems that the most important variables are the car's age, its number of kilometers, and its Quarterly tax.  
+
+### 1.4 Determine prediction errors using RMS error.  
+
+Using some code that I wrote for a previous homework we can find the RSQ for the model performance on the training and test set.  
+
+
+
+```{r}
+predictions_train <- augment(model_rpart, new_data = train)
+predictions_holdout <- augment(model_rpart, new_data = holdout)
+
+train_out <- predictions_train %>% 
+  metrics(truth = Price, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "rsq"))
+
+holdout_out <- predictions_holdout %>% 
+  metrics(truth = Price, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "rsq"))
+         
+final_results_big <- bind_rows(
+  train_out %>% mutate(set = "Train"),
+  holdout_out %>% mutate(set = "Holdout")
+) %>%
+  pivot_wider(names_from = set, values_from = .estimate) %>% 
+  select(Train,Holdout,.metric)
+
+final_results_big %>% 
+  knitr::kable(caption = "Tree peformance on Training and Holdout Data", 
+               digits = 3)
+```
+
+Here we see that the RSQ does pretty well, it decreases from .934 to .854 on the test data.  
+
+
+### 1.5 How might we improve model performance?  
+
+In order to improve results on the unseen test data we need to reduce the model over fitting on the training data. We can achieve this by limiting the tree depth, or by pruning the tree (tuning the `complexity parameter`). Or, by a combination of the tuning of the other model parameters.
+
+
+### 1.6 Create a smaller tree  
+
+Small tree model using some different parameters  
+
+We create a new workflow with the new specifications for the parameters, and fit a new model:  
+```{r}
+tree_spec_small <- decision_tree(engine="rpart", mode="regression",
+                           min_n = 2,
+                           tree_depth = 30,
+                           cost_complexity=.01)
+
+wf_rpart_small <- workflow() %>%
+    add_recipe(rec) %>%
+    add_model(tree_spec_small)
+
+model_rpart_small <- fit(wf_rpart_small, data=train)
+```  
+
+```{r}
+png("decision_tree_small.png", width = 3000, height = 2000, res = 500)
+rpart.plot(model_rpart_small %>% extract_fit_engine(), type = 3, extra = 101, 
+           under = TRUE, tweak = 1.2, roundint = F)
+```
+
+
+![Smaller Tree]("decision_tree_small.png")
+
+Here we see that there much fewer splits than previously, the same predictors were important however.  
+
+```{r}
+predictions_train <- augment(model_rpart_small, new_data = train)
+predictions_holdout <- augment(model_rpart_small, new_data = holdout)
+
+train_out <- predictions_train %>% 
+  metrics(truth = Price, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "rsq"))
+
+holdout_out <- predictions_holdout %>% 
+  metrics(truth = Price, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "rsq"))
+         
+final_results_small <- bind_rows(
+  train_out %>% mutate(set = "Train"),
+  holdout_out %>% mutate(set = "Holdout")
+) %>%
+  pivot_wider(names_from = set, values_from = .estimate) %>% 
+  select(Train,Holdout,.metric) 
+
+final_results_small%>% 
+  knitr::kable(caption = "Tree peformance on Training and Holdout Data", 
+               digits = 3)
+```
+
+Here we see that the simpler model does worse on predictions of the training data, and has essential the same predictive performance on the unseen test data.  
+
+### 1.7 Tuned Tree (cost_complexity)  
+
+
+Define a workflow:  
+
+```{r}
+
+resamples <- vfold_cv(train, v=10, strata=Price)
+
+tree_spec_tune <- decision_tree(engine="rpart", mode="regression",
+                           min_n = 2,
+                           tree_depth = 30,
+                           cost_complexity=tune())
+
+wf_rpart_tune <- workflow() %>%
+    add_recipe(rec) %>%
+    add_model(tree_spec_tune)
+
+parameters <- extract_parameter_set_dials(wf_rpart_tune)
+parameters <- parameters %>%
+    update(
+      cost_complexity = cost_complexity(c(-4, -1))
+    )
+```
+
+```{r}
+tune_rpart <- tune_grid(wf_rpart_tune, resamples=resamples, 
+                        grid=grid_regular(parameters, levels=50))
+autoplot(tune_rpart)
+(best_parameters <- select_best(tune_rpart, metric="rsq"))
+```
+
+### 1.8 Best value for cost complexity  
+
+Here we see that the cost_complexity with the best_metrics for rsq was .00072
+
+```{r}
+tuned_wf_rpart <- finalize_workflow(wf_rpart_tune, best_parameters) %>% 
+  fit(data=train)
+```  
+
+```{r}
+predictions_train <- augment(tuned_wf_rpart, new_data = train)
+predictions_holdout <- augment(tuned_wf_rpart, new_data = holdout)
+
+train_out <- predictions_train %>% 
+  metrics(truth = Price, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "rsq"))
+
+holdout_out <- predictions_holdout %>% 
+  metrics(truth = Price, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "rsq"))
+         
+final_results_tuned <- bind_rows(
+  train_out %>% mutate(set = "Train"),
+  holdout_out %>% mutate(set = "Holdout")
+) %>%
+  pivot_wider(names_from = set, values_from = .estimate) %>% 
+  select(Train,Holdout,.metric) 
+
+final_results_tuned%>% 
+  knitr::kable(caption = " Tuned Tree peformance on Training and Holdout Data", 
+               digits = 3)
+```
+
+### How does it compare?  
+
+We can combine the three tables to directly compare the metrics from each model:  
+
+```{r}
+
+final_results_tuned <- final_results_tuned %>% mutate(model = "Tuned Tree")
+final_results_big <- final_results_big %>% mutate(model = "Large Tree")
+final_results_small <- final_results_small %>% mutate(model = "Small Tree")
+
+all_results <- bind_rows(final_results_big,final_results_small,
+                         final_results_tuned)
+all_results <- all_results %>% select(everything(),model)
+
+knitr::kable(all_results, caption = "Comparison of Model Performance", 
+             digits = 3)
+```
+
+We see that with the tuned model, the tree performs the betst on both the training and holdout datasets.  
+
+### 1.10 Train a final model, visualize
+
+
+```{r}
+png("decision_tree_tuned.png", width = 3000, height = 2000, res = 500)
+rpart.plot(tuned_wf_rpart %>% extract_fit_engine(), type = 3, extra = 101, 
+           under = TRUE, tweak = 1.2, roundint = F)
+```
+
+![Tuned Tree]("decision_tree_tuned.png")
+
+### 1.11 Predictions  
+
+```{r}
+newdata <- data.frame(
+Age_08_04=77, KM=117000, Fuel_Type="Petrol", HP=110, Automatic=0, Doors=5, 
+Quarterly_Tax=100, Mfr_Guarantee=0, Guarantee_Period=3, Airco=1, 
+Automatic_airco=0, CD_Player=0, Powered_Windows=0, Sport_Model=0, Tow_Bar=1
+)
+
+newdata <- newdata %>% 
+  mutate(
+    Fuel_Type = as.factor(Fuel_Type),
+    Automatic = as.factor(Automatic),
+    Doors = as.factor(Doors),
+    Mfr_Guarantee = as.factor(Mfr_Guarantee),
+    Airco = as.factor(Airco),
+    Automatic_airco = as.factor(Automatic_airco),
+    CD_Player = as.factor(CD_Player),
+    Powered_Windows = as.factor(Powered_Windows),
+    Sport_Model = as.factor(Sport_Model),
+    Tow_Bar = as.factor(Tow_Bar)
+  )
+```
+
+```{r}
+predict(tuned_wf_rpart %>% extract_fit_engine(), newdata = newdata)
+```
+The predicted price would be 7380.57 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+stopCluster(cl)
+registerDoSEQ()
+```
