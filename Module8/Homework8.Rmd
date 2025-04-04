@@ -3,8 +3,9 @@ title: "Homework8"
 author: "Patrick Foster"
 date: "2025-03-23"
 output:
-  pdf_document: default
+  github_document: default
   html_document: default
+  pdf_document: default
 ---
 ```{r setup}
 #| include: FALSE

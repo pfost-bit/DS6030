@@ -1,0 +1,405 @@
+Homework8
+================
+Patrick Foster
+2025-03-23
+
+``` r
+library(tidyverse)
+library(tidymodels)
+library(partykit)
+library(ggparty)
+library(bonsai)
+library(patchwork)
+library(rpart.plot)
+library(baguette)
+library(patchwork)
+library(vip)
+```
+
+``` r
+library(doParallel)
+cl <- makePSOCKcluster(parallel::detectCores(logical = FALSE))
+registerDoParallel(cl)
+```
+
+# Chemical Toxicity in Fish
+
+## 1.1 Load in the Data.
+
+First we read in the data using the `read_delim` function.
+
+``` r
+data <- read_delim("https://gedeck.github.io/DS-6030/datasets/homework/qsar_fish_toxicity.csv", 
+                   delim = ';', show_col_types = F)
+```
+
+Then we pass a vector of column names.
+
+``` r
+colnames(data) <- c("CIC0","SM1_Dz(Z)","GATS1i", "NdsCH", 
+                    "NDssC", "MLOGP", "LC50")
+```
+
+## 1.2 Split the data and prepare for CV.
+
+Now we create the 80/20 training/test split.
+
+``` r
+data_split <- initial_split(data, prop = .8, strata = LC50)
+train <- training(data_split)
+holdout <- testing(data_split)
+```
+
+Now we set up the cross validation.
+
+``` r
+resamples <- vfold_cv(train, strata=LC50)
+```
+
+## 1.3 Fit and tune models
+
+First we pass a formula and some metrics and controls for the cross
+validation.
+
+``` r
+formula <- LC50~CIC0+`SM1_Dz(Z)`+GATS1i+NdsCH+NDssC+MLOGP
+
+cv_control <- control_resamples(save_pred=TRUE)
+cv_metrics <- metric_set(rmse,rsq)
+```
+
+Now we can fit the models:
+
+### Linear Regression
+
+``` r
+linear_spec <- linear_reg(mode = "regression") %>% 
+  set_engine("lm")
+
+linear_wf <- workflow() %>%
+    add_recipe(recipe(formula, data=train)) %>%
+    add_model(linear_spec)
+
+lin_fit <- fit_resamples(
+  linear_wf,
+  resamples = resamples,
+  metrics = cv_metrics,
+  control = cv_control
+)
+```
+
+``` r
+lin_metrics <- collect_metrics(lin_fit)
+```
+
+### Random Forest
+
+``` r
+random_wf <- workflow() %>%
+    add_recipe(recipe(formula, data=train)) %>%
+    add_model(rand_forest(mode="regression", mtry=tune(), min_n=tune()) %>%
+            set_engine("ranger", importance="impurity"))
+```
+
+``` r
+library(bonsai)
+
+parameters <- extract_parameter_set_dials(random_wf) %>%
+    update(mtry = mtry(c(2, 8)))
+
+tune_random <- tune_bayes(random_wf,
+    resamples=resamples,
+    metrics=cv_metrics,
+    param_info=parameters, iter=25)
+```
+
+    ## ! No improvement for 10 iterations; returning current results.
+
+``` r
+autoplot(tune_random)
+```
+
+<img src="Homework8_files/figure-gfm/unnamed-chunk-6-1.png" style="display: block; margin: auto;" />
+
+``` r
+best_random_wf <- random_wf %>%
+    finalize_workflow(select_best(tune_random, metric="rmse"))
+random_cv <- fit_resamples(best_random_wf, resamples, 
+                           metrics=cv_metrics, control=cv_control)
+```
+
+``` r
+ran_metrics <- collect_metrics(random_cv)
+```
+
+### Boosting.
+
+``` r
+boost_wf <- workflow() %>%
+    add_recipe(recipe(formula, data=train)) %>%
+    add_model(boost_tree(mode="regression", engine="xgboost",
+            trees=500, tree_depth=tune(), learn_rate=tune()))
+
+parameters <- extract_parameter_set_dials(boost_wf)
+
+tune_boost <- tune_bayes(boost_wf,
+    resamples=resamples,
+    metrics=cv_metrics,
+    param_info=parameters, iter=25)
+autoplot(tune_boost)
+```
+
+<img src="Homework8_files/figure-gfm/unnamed-chunk-9-1.png" style="display: block; margin: auto;" />
+
+``` r
+best_boost_wf <- boost_wf %>%
+    finalize_workflow(select_best(tune_boost, metric="rmse"))
+boost_cv <- fit_resamples(best_boost_wf, resamples, 
+                          metrics=cv_metrics, control=cv_control)
+
+boost_metrics <- collect_metrics(boost_cv)
+```
+
+### k-nearest neigbors
+
+``` r
+nearest_wf <- workflow() %>% 
+  add_recipe(recipe(formula, data=train)) %>%
+  add_model(nearest_neighbor(mode="regression", neighbors=tune(), 
+                             weight_func="triangular") %>%
+    set_engine("kknn"))
+
+parameters <- extract_parameter_set_dials(nearest_wf)
+
+tune_nearest <- tune_bayes(nearest_wf,
+    resamples=resamples,
+    metrics=cv_metrics,
+    param_info=parameters, iter=25)
+```
+
+    ## ! No improvement for 10 iterations; returning current results.
+
+``` r
+autoplot(tune_nearest)
+```
+
+<img src="Homework8_files/figure-gfm/unnamed-chunk-11-1.png" style="display: block; margin: auto;" />
+
+``` r
+best_nearest_wf <- nearest_wf %>%
+    finalize_workflow(select_best(tune_nearest, metric="rmse"))
+nearest_cv <- fit_resamples(best_nearest_wf, resamples, 
+                            metrics=cv_metrics, control=cv_control)
+
+nearest_metrics <- collect_metrics(nearest_cv)
+```
+
+## 1.4 Report the CV metrics.
+
+``` r
+lin_metrics <- lin_metrics %>% mutate(Model = "Linear Regression")
+ran_metrics<- ran_metrics  %>% mutate(Model = "Random Forest")
+boost_metrics <- boost_metrics  %>% mutate(Model = "Boosting")
+nearest_metrics <- nearest_metrics %>% mutate(Model = "Nearest Neigbors")
+
+all_results <- bind_rows(lin_metrics,ran_metrics,
+                         boost_metrics,nearest_metrics)%>% 
+  select(.metric, mean, std_err, Model)
+
+knitr::kable(all_results, caption = "Comparison of Model Performance",
+             digits = 3)
+```
+
+| .metric |  mean | std_err | Model             |
+|:--------|------:|--------:|:------------------|
+| rmse    | 0.931 |   0.029 | Linear Regression |
+| rsq     | 0.585 |   0.034 | Linear Regression |
+| rmse    | 0.853 |   0.031 | Random Forest     |
+| rsq     | 0.646 |   0.028 | Random Forest     |
+| rmse    | 0.873 |   0.033 | Boosting          |
+| rsq     | 0.632 |   0.028 | Boosting          |
+| rmse    | 0.860 |   0.031 | Nearest Neigbors  |
+| rsq     | 0.643 |   0.030 | Nearest Neigbors  |
+
+Comparison of Model Performance
+
+We can see from above that the best model to choose from based of of
+training results is the Random Forest, it minimizes the RMSE to .853.
+Both Boosting and KKNN perform adequately well.
+
+## 1.5 Fit the final models
+
+Now we can fit all of the final trained models.
+
+``` r
+fitted_lin <- linear_wf %>% fit(train)
+fitted_random <- best_random_wf %>% fit(train)
+fitted_boost <- best_boost_wf %>%  fit(train)
+fitted_nearest <- best_nearest_wf %>% fit(train)
+```
+
+## 1.6 Evaluate on the Test set.
+
+``` r
+metrics <- metric_set(rmse, mae)
+```
+
+### Linear
+
+``` r
+holdout_pred_lin <- augment(fitted_lin, new_data = holdout)
+
+holdout_results_lin <- holdout_pred_lin %>%  
+  metrics(truth = LC50, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "mae")) %>% 
+  mutate(Model = "Linear Regression")
+```
+
+### Random Forest
+
+``` r
+holdout_pred_random <- augment(fitted_random, new_data = holdout)
+
+holdout_results_random <- holdout_pred_random %>%  
+  metrics(truth = LC50, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "mae")) %>% 
+  mutate(Model = "Random Forest")
+```
+
+### Boosting
+
+``` r
+holdout_pred_boost <- augment(fitted_boost, new_data = holdout)
+
+holdout_results_boost <- holdout_pred_boost %>%  
+  metrics(truth = LC50, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "mae")) %>% 
+  mutate(Model = "Boosting")
+```
+
+### KKNN
+
+``` r
+holdout_pred_nearest <- augment(fitted_nearest, new_data = holdout)
+
+holdout_results_nearest <- holdout_pred_nearest %>%  
+  metrics(truth = LC50, estimate = .pred) %>% 
+  select(.metric, .estimate) %>% 
+  filter(.metric %in% c("rmse", "mae")) %>% 
+  mutate(Model = "Nearest Neigbors")
+```
+
+### Compare them on test
+
+``` r
+test_results <- bind_rows(
+  holdout_results_lin,
+  holdout_results_random,
+  holdout_results_boost,
+  holdout_results_nearest
+)
+
+knitr::kable(test_results, caption = "Comparison of Model 
+             Performance on Test Data",
+             digits = 3)
+```
+
+| .metric | .estimate | Model             |
+|:--------|----------:|:------------------|
+| rmse    |     1.032 | Linear Regression |
+| mae     |     0.731 | Linear Regression |
+| rmse    |     0.944 | Random Forest     |
+| mae     |     0.667 | Random Forest     |
+| rmse    |     0.965 | Boosting          |
+| mae     |     0.684 | Boosting          |
+| rmse    |     0.942 | Nearest Neigbors  |
+| mae     |     0.646 | Nearest Neigbors  |
+
+Comparison of Model Performance on Test Data
+
+Similarly to on the holdout data the Random forest and the Nearest
+neighbors perform the best. The boost does similarly well, the Linear
+model is the worst of the bunch. We can see that there are some outliers
+in the data as the MAE is smaller then the the RMSE in all cases.
+
+## 1.7 Visualization of RMSE
+
+``` r
+visualizations_results <- bind_rows(test_results %>%mutate(dataset = "holdout"),
+          all_results %>% rename(.estimate = mean) %>%mutate(dataset = "train"))
+
+visualizations_results <- visualizations_results %>% 
+  filter(.metric == "rmse") %>% 
+  select(.metric, .estimate, Model, dataset)
+
+visualizations_results %>% 
+  ggplot(aes(x=.estimate, y=Model, color = dataset))+
+  geom_point()+
+  labs(title = "RMSE of different models, 
+       determined on training and holdout sets",
+       x = "RMSE")
+```
+
+<img src="Homework8_files/figure-gfm/unnamed-chunk-21-1.png" style="display: block; margin: auto;" />
+
+From the above selection we see that by tuning our models we improve
+performance but only to a point. The RMSE of all of the models was
+higher on the holdout set, as expected. The RMSE of the non-linear
+models all have similar RMSE.
+
+## 1.8 Visualization of residual plots.
+
+``` r
+plot_residuals <- function(predictions, model_name = "Model") {
+  predictions %>%
+    mutate(residual = LC50 - .pred) %>%
+    ggplot(aes(x = .pred, y = residual)) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(se=F, method = "lm") +
+    labs(title = paste("Residual Plot -", model_name),
+         x = "Predicted",
+         y = "Residual") +
+    theme_minimal()
+}
+```
+
+``` r
+lm <-plot_residuals(collect_predictions(lin_fit), "Linear Regression")
+rf <-plot_residuals(collect_predictions(random_cv), "Random Forest")
+bm <-plot_residuals(collect_predictions(boost_cv), "Boost")
+kn <-plot_residuals(collect_predictions(nearest_cv), "Nearest Neighbors")
+
+(lm + rf)/ (bm+kn)
+```
+
+    ## `geom_smooth()` using formula = 'y ~ x'
+    ## `geom_smooth()` using formula = 'y ~ x'
+    ## `geom_smooth()` using formula = 'y ~ x'
+    ## `geom_smooth()` using formula = 'y ~ x'
+
+<img src="Homework8_files/figure-gfm/unnamed-chunk-23-1.png" style="display: block; margin: auto;" />
+
+We can see that there is not very much difference in the residuals of
+the four models. In general the residuals are fairly evenly spread
+around the best fit line, and are generally straight.
+
+## 1.9 Variable Importance Plot
+
+Using the VIP library we can generate a plot.
+
+``` r
+vip(fitted_boost, num_features = 6)
+```
+
+<img src="Homework8_files/figure-gfm/unnamed-chunk-24-1.png" style="display: block; margin: auto;" />
+
+Here we see that the most important feature is MLOGP, which seems to
+dominate.
+
+``` r
+stopCluster(cl)
+registerDoSEQ()
+```
