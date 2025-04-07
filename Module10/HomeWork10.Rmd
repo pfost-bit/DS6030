@@ -337,6 +337,7 @@ We are going to create a k-means cluster using the tidyclust package.
 First we define a workflow.  
 
 ```{r}
+set.seed(126)
 
 formula <- (~.)
 
@@ -393,11 +394,11 @@ ft_kmeans %>%
 
 Here we see that the clusters are definitely separating along some line. They have different clusters for different areas of the scatter plot. The clusters seem to further divide the political spectrum along the PC1/PC2 Axis. Into a Far Right, Middle Right, True Moderate, Middle Left, and Far left.   
 
-* Cluster1 : Orange :  True-Moderate  
-* Cluster2 : Yellow : Middle-Right  
-* Cluster3 : Green : Far-Left  
-* Cluster4 : Blue : Far-Right  
-* Cluster5 : Purple: Middle-Left  
+* Cluster1 : Orange : Middle-Right    
+* Cluster2 : Yellow : Far-Right  
+* Cluster3 : Green : True-Moderate   
+* Cluster4 : Blue : Far-Left  
+* Cluster5 : Purple: Middle-Left   
 
 For further analysis we can create a new variable `Cluster` with this factor in mind.  
 
@@ -406,7 +407,7 @@ ft_kmeans <- ft_kmeans %>%
   mutate(
     Cluster = factor(.pred_cluster, 
    levels=c('Cluster_1','Cluster_2','Cluster_3','Cluster_4','Cluster_5'),
-   labels=c("True-Moderate","Middle-Right","Far-Left","Far-Right","Middle-Left"))
+   labels=c("Middle-Right","Far-Right","True-Moderate","Far-Left","Middle-Left"))
   )
 ```
 

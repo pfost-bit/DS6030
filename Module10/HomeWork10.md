@@ -440,6 +440,8 @@ We are going to create a k-means cluster using the tidyclust package.
 First we define a workflow.
 
 ``` r
+set.seed(126)
+
 formula <- (~.)
 
 rec_ft <- recipe(formula,data=ft) %>% 
@@ -510,10 +512,10 @@ The clusters seem to further divide the political spectrum along the
 PC1/PC2 Axis. Into a Far Right, Middle Right, True Moderate, Middle
 Left, and Far left.
 
-- Cluster1 : Orange : True-Moderate  
-- Cluster2 : Yellow : Middle-Right  
-- Cluster3 : Green : Far-Left  
-- Cluster4 : Blue : Far-Right  
+- Cluster1 : Orange : Middle-Right  
+- Cluster2 : Yellow : Far-Right  
+- Cluster3 : Green : True-Moderate  
+- Cluster4 : Blue : Far-Left  
 - Cluster5 : Purple: Middle-Left
 
 For further analysis we can create a new variable `Cluster` with this
@@ -524,7 +526,7 @@ ft_kmeans <- ft_kmeans %>%
   mutate(
     Cluster = factor(.pred_cluster, 
    levels=c('Cluster_1','Cluster_2','Cluster_3','Cluster_4','Cluster_5'),
-   labels=c("True-Moderate","Middle-Right","Far-Left","Far-Right","Middle-Left"))
+   labels=c("Middle-Right","Far-Right","True-Moderate","Far-Left","Middle-Left"))
   )
 ```
 
@@ -533,13 +535,13 @@ tidy(kmeans_model)
 ```
 
     ## # A tibble: 5 × 19
-    ##   fthisp ftasian  ftfbi ftscotus fttrump ftbiden   ftdem  ftrep ftteach   ftfem
-    ##    <dbl>   <dbl>  <dbl>    <dbl>   <dbl>   <dbl>   <dbl>  <dbl>   <dbl>   <dbl>
-    ## 1 -1.32   -1.33  -0.769   -0.581 -0.0681 -0.653  -0.670  -0.330 -1.17   -0.794 
-    ## 2  0.346   0.453 -0.856    0.680  1.03   -1.07   -1.02    0.922 -0.410  -0.770 
-    ## 3 -0.530  -0.536  0.311    0.280  0.227   0.0461  0.0620  0.283 -0.0804 -0.0123
-    ## 4  0.785   0.725  1.06     0.236 -0.605   0.928   0.921  -0.225  0.801   0.715 
-    ## 5  0.275   0.202  0.265   -0.997 -0.975   0.859   0.788  -1.06   0.580   0.801 
+    ##   fthisp ftasian  ftfbi ftscotus fttrump ftbiden  ftdem  ftrep ftteach   ftfem
+    ##    <dbl>   <dbl>  <dbl>    <dbl>   <dbl>   <dbl>  <dbl>  <dbl>   <dbl>   <dbl>
+    ## 1 -1.36   -1.36  -0.895  -0.551   0.0710  -0.845 -0.911 -0.222  -1.32  -0.939 
+    ## 2  0.266   0.361 -0.937   0.670   1.06    -1.10  -1.07   0.923  -0.474 -0.820 
+    ## 3 -0.729  -0.744  0.123  -0.0569 -0.124    0.113  0.132 -0.138  -0.200 -0.0508
+    ## 4  0.553   0.490  0.578  -0.747  -0.994    1.01   0.933 -0.973   0.705  0.880 
+    ## 5  0.466   0.451  0.770   0.738   0.310    0.200  0.309  0.684   0.538  0.309 
     ## # ℹ 9 more variables: ftnfem <dbl>, ftjourn <dbl>, ftmen <dbl>, ftwomen <dbl>,
     ## #   fttrans <dbl>, jan6therm <dbl>, size <int>, withinss <dbl>, cluster <fct>
 
