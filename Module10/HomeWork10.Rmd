@@ -3,9 +3,9 @@ title: "Homework10"
 author: "Patrick Foster"
 date: "2025-04-06"
 output:
-  github_document: default
-  html_document: default
   pdf_document: default
+  html_document: default
+  github_document: default
 ---
 
 
