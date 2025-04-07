@@ -431,7 +431,41 @@ autoplot(result)
 
 <img src="HomeWork10_files/figure-gfm/unnamed-chunk-26-1.png" style="display: block; margin: auto;" />
 
-Here we see that the optimal number of clusters is 3.
+Here we see that the optimal number of clusters is 3. We can now
+finalize the model and visualize with a scatterplot.
+
+``` r
+best_params <- data.frame(num_clusters=3)
+model <- finalize_workflow_tidyclust(hier_wf,best_params)
+```
+
+``` r
+final_hier_model <- model %>% fit(ft)
+```
+
+``` r
+ft_hier <- augment(final_hier_model, new_data = ft) %>% 
+  select(caseid, .pred_cluster)
+```
+
+``` r
+ft_hier <- ft_hier %>% 
+  inner_join(ft_profile,by="caseid")
+```
+
+``` r
+ft_hier %>% 
+  ggplot(aes(x=PC1,y=PC2))+
+  geom_point(aes(color = .pred_cluster), alpha=.6)+
+    labs(title= "PC1 vs PC2 with k-means clustering",
+       x = "PC1 (Political Right vs Left)",
+       y = "PC2 (Ideals vs Groups)",
+       color = "Cluster")
+```
+
+<img src="HomeWork10_files/figure-gfm/unnamed-chunk-31-1.png" style="display: block; margin: auto;" />
+
+Here we see the scatter of PC1 vs PC2 with the three Clusters.
 
 ### 2.2 k-means clustering
 
@@ -504,7 +538,7 @@ ft_kmeans %>%
        color = "Cluster")
 ```
 
-<img src="HomeWork10_files/figure-gfm/unnamed-chunk-32-1.png" style="display: block; margin: auto;" />
+<img src="HomeWork10_files/figure-gfm/unnamed-chunk-37-1.png" style="display: block; margin: auto;" />
 
 Here we see that the clusters are definitely separating along some line.
 They have different clusters for different areas of the scatter plot.
@@ -566,7 +600,7 @@ tidy(kmeans_model) %>%
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
-<img src="HomeWork10_files/figure-gfm/unnamed-chunk-35-1.png" style="display: block; margin: auto;" />
+<img src="HomeWork10_files/figure-gfm/unnamed-chunk-40-1.png" style="display: block; margin: auto;" />
 
 Here we see that the cluster do tend to help separate on the political
 spectrum.
@@ -587,7 +621,7 @@ ft_kmeans %>%
   )
 ```
 
-<img src="HomeWork10_files/figure-gfm/unnamed-chunk-36-1.png" style="display: block; margin: auto;" />
+<img src="HomeWork10_files/figure-gfm/unnamed-chunk-41-1.png" style="display: block; margin: auto;" />
 
 This tends to agree with what I saw in 1.6. Females tend to be more
 left-leaning than men, their is a higher proportion of Left/Middle-Left
@@ -606,7 +640,7 @@ ft_kmeans %>%
   theme(axis.text.x = element_text(angle=45, hjust =1))
 ```
 
-<img src="HomeWork10_files/figure-gfm/unnamed-chunk-37-1.png" style="display: block; margin: auto;" />
+<img src="HomeWork10_files/figure-gfm/unnamed-chunk-42-1.png" style="display: block; margin: auto;" />
 
 This also agrees with 1.6. The Far-Left definitely increases as
 education increases.
@@ -624,7 +658,7 @@ ft_kmeans %>%
   theme(axis.text.x = element_text(angle=45, hjust =1))
 ```
 
-<img src="HomeWork10_files/figure-gfm/unnamed-chunk-38-1.png" style="display: block; margin: auto;" />
+<img src="HomeWork10_files/figure-gfm/unnamed-chunk-43-1.png" style="display: block; margin: auto;" />
 
 These clusters seem to be agreeing with what I saw in 1.6. It was harder
 to make seperations based on Marriage staus, however the married couples
@@ -647,7 +681,7 @@ ft_kmeans %>%
   theme(axis.text.x = element_text(angle=45, hjust =1))
 ```
 
-<img src="HomeWork10_files/figure-gfm/unnamed-chunk-39-1.png" style="display: block; margin: auto;" />
+<img src="HomeWork10_files/figure-gfm/unnamed-chunk-44-1.png" style="display: block; margin: auto;" />
 
 Here it is even more clear that the distributions support the
 conclusions from 1.7. The Far-Right/Right Finds Gun Ownership to be

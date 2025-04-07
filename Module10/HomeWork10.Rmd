@@ -3,9 +3,9 @@ title: "Homework10"
 author: "Patrick Foster"
 date: "2025-04-06"
 output:
-  pdf_document: default
-  html_document: default
   github_document: default
+  html_document: default
+  pdf_document: default
 ---
 
 
@@ -292,6 +292,7 @@ plot(get_hier_clust_fit("single")$fit,
 ```
 
 
+
 Judging from the above graph I am going to choose the complete linkage for the balanced clustering.  
 
 Now we can tune a model to choose the clustering depth.  
@@ -326,9 +327,42 @@ registerDoParallel(cl)
 
 ```{r}
 autoplot(result)
+``` 
+
+Here we see that the optimal number of clusters is 3. We can now finalize the model and visualize with a scatterplot.  
+
+```{r}
+best_params <- data.frame(num_clusters=3)
+model <- finalize_workflow_tidyclust(hier_wf,best_params)
 ```
 
-Here we see that the optimal number of clusters is 3.  
+```{r}
+final_hier_model <- model %>% fit(ft)
+```  
+
+```{r}
+ft_hier <- augment(final_hier_model, new_data = ft) %>% 
+  select(caseid, .pred_cluster)
+```
+
+```{r}
+ft_hier <- ft_hier %>% 
+  inner_join(ft_profile,by="caseid")
+```  
+
+```{r}
+ft_hier %>% 
+  ggplot(aes(x=PC1,y=PC2))+
+  geom_point(aes(color = .pred_cluster), alpha=.6)+
+    labs(title= "PC1 vs PC2 with k-means clustering",
+       x = "PC1 (Political Right vs Left)",
+       y = "PC2 (Ideals vs Groups)",
+       color = "Cluster")
+```
+ 
+Here we see the scatter of PC1 vs PC2 with the three Clusters.  
+
+
 
 ### 2.2 k-means clustering  
 
